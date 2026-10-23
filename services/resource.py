@@ -16,8 +16,10 @@ A token exchanged for Service A is useless at Service B and vice versa, and
 the BFF's own access token (no audience) is useless at both.
 
 Environment: SERVICE_ID (its client id and the audience it accepts),
-SERVICE_SECRET (client secret for introspection), SERVICE_SCOPE (scope its
-read endpoint needs), ISSUER, PORT, TRACE_FILE (dev only),
+SERVICE_SECRET (client secret for introspection, usually a Vault reference
+`vault:kv/service-a#client_secret`), VAULT_ADDR and VAULT_TOKEN_FILE (the
+service's own Vault token: it can read only its own secret), SERVICE_SCOPE
+(scope its read endpoint needs), ISSUER, PORT, TRACE_FILE (dev only),
 SSL_CERT_FILE (trust anchor for Keycloak's TLS certificate).
 
     python -m services.resource
@@ -31,7 +33,7 @@ from typing import Optional
 
 import jwt
 
-from plugins import trace
+from plugins import trace, vault
 from services.web import Request, Response, TracedJwks, json_response, post_form, serve
 
 ALGORITHMS = ["RS256", "PS256", "ES256"]
@@ -49,9 +51,17 @@ class Forbidden(Exception):
 @dataclass
 class Settings:
     service_id: str
-    secret: str
+    secret: str          # or a Vault reference, read when needed (cached, so rotation arrives)
     scope: str
     issuer: str
+    vault_addr: Optional[str] = None
+    vault_token_file: Optional[str] = None
+
+    @property
+    def client_secret(self) -> str:
+        if vault.is_ref(self.secret):
+            return vault.read(self.secret, self.vault_addr, self.vault_token_file)
+        return self.secret
 
 
 class ResourceServer:
@@ -118,7 +128,7 @@ class ResourceServer:
     def _introspect_at_keycloak(self, token: str) -> dict:
         status, body = post_form(self.metadata["introspection_endpoint"],
                                  {"token": token, "token_type_hint": "access_token"},
-                                 basic_auth=(self.s.service_id, self.s.secret))
+                                 basic_auth=(self.s.service_id, self.s.client_secret))
         if status != 200:
             # fail closed: no answer is no permission
             raise Unauthorized(f"introspection failed ({status})")
@@ -166,7 +176,8 @@ class ResourceServer:
 
 def main():
     settings = Settings(service_id=os.environ["SERVICE_ID"], secret=os.environ["SERVICE_SECRET"],
-                        scope=os.environ["SERVICE_SCOPE"], issuer=os.environ["ISSUER"])
+                        scope=os.environ["SERVICE_SCOPE"], issuer=os.environ["ISSUER"],
+                        vault_addr=os.environ.get("VAULT_ADDR"), vault_token_file=os.environ.get("VAULT_TOKEN_FILE"))
     serve(settings.service_id, ResourceServer(settings).routes(), os.environ.get("HOST", "0.0.0.0"),
           int(os.environ["PORT"]))
 

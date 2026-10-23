@@ -1,49 +1,64 @@
 name: apisix-tokenhandler
 
 # Every component reaches every other one by its public name over https,
-# through the gateway, as in production: app.example.test and
-# auth.example.test are network aliases of the gateway, so they resolve to it
-# inside the stack as well. On the host, add to /etc/hosts:
-#   127.0.0.1 app.example.test auth.example.test
-# TLS uses the dev PKI in conf/pki, made per machine by the `pki` service
-# (scripts/dev_pki.py) before anything else starts; it is gitignored.
+# through the gateway, as in production: app.example.test, auth.example.test
+# and vault.example.test are network aliases of the gateway, so they resolve
+# to it inside the stack as well. On the host, add to /etc/hosts:
+#   127.0.0.1 app.example.test auth.example.test vault.example.test
+#
+# Secrets and PKI live in Vault (persistent, in the vault-data volume). Start
+# order: vault -> vault-init (init/unseal, PKI, secrets, per-component tokens
+# in .dev/) -> keycloak -> keycloak-init (client secrets from Vault) -> the rest.
+# .dev/ is gitignored; never commit or publish it.
 
-x-service: &service
+x-python: &python
   build:
     context: ..
     dockerfile: .devcontainer/services.Dockerfile
   user: "${USER_UID:-1000}:${USER_GID:-1000}"
   working_dir: /workspace
-  command: ["python", "-m", "services.resource"]
   volumes:
-    # the code, and traffic-report/ for the dev trace
     - ..:/workspace
+
+x-service: &service
+  <<: *python
+  command: ["python", "-m", "services.resource"]
   depends_on:
-    pki:
+    keycloak-init:
       condition: service_completed_successfully
-    keycloak:
-      condition: service_started
 
 x-service-env: &service-env
   ISSUER: https://auth.example.test/realms/demo
-  # trust anchor for Keycloak's certificate
-  SSL_CERT_FILE: /workspace/conf/pki/ca.pem
+  VAULT_ADDR: http://vault:8200
+  # trust anchor for Keycloak's certificate: the CA of Vault's PKI
+  SSL_CERT_FILE: /workspace/.dev/ca.pem
   # DEV ONLY: traffic trace for the test report (holds tokens)
   TRACE_FILE: /workspace/traffic-report/bff-trace.jsonl
   PYTHONUNBUFFERED: "1"
 
 services:
-  # One-shot: creates conf/pki (dev CA + certificate for *.example.test) if it
-  # is missing or about to expire; everything below waits for it.
-  pki:
-    build:
-      context: ..
-      dockerfile: .devcontainer/services.Dockerfile
-    user: "${USER_UID:-1000}:${USER_GID:-1000}"
-    working_dir: /workspace
-    command: ["python", "scripts/dev_pki.py"]
+  # Secrets and PKI (conf/vault/vault.hcl): one server, file storage, plain
+  # http inside the network; UI at https://vault.example.test.
+  vault:
+    image: hashicorp/vault:2.1.2
+    command: ["server"]
+    environment:
+      # mlock is disabled in vault.hcl, so no IPC_LOCK capability needed
+      SKIP_SETCAP: "true"
     volumes:
-      - ..:/workspace
+      - ../conf/vault/vault.hcl:/vault/config/vault.hcl:ro
+      - vault-data:/vault/file
+
+  # One-shot: initializes/unseals Vault, sets up PKI, secrets, policies and
+  # per-component tokens (scripts/stack_init.py); idempotent.
+  vault-init:
+    <<: *python
+    command: ["python", "scripts/stack_init.py", "vault"]
+    environment:
+      VAULT_ADDR: http://vault:8200
+    depends_on:
+      vault:
+        condition: service_started
 
   # The gateway (APISIX + tokenhandler BFF) and the dev container in one.
   apisix:
@@ -55,6 +70,7 @@ services:
         USER_GID: ${USER_GID:-1000}
     environment:
       APISIX_STAND_ALONE: "true"
+      VAULT_ADDR: http://vault:8200
     volumes:
       - ..:/workspace:cached
       - claude-config:/home/apisix/.claude
@@ -66,23 +82,21 @@ services:
         aliases:
           - app.example.test
           - auth.example.test
+          - vault.example.test
     depends_on:
-      pki:
+      keycloak-init:
         condition: service_completed_successfully
-      keycloak:
-        condition: service_started
       service-a:
         condition: service_started
       service-b:
         condition: service_started
 
-  # Authorization server; realm, clients and user in conf/keycloak/demo-realm.json.
-  # Behind the gateway: TLS ends there, Keycloak knows its public URL.
+  # Authorization server; realm, clients and user in conf/keycloak/demo-realm.json
+  # (no secrets in it). Behind the gateway: TLS ends there, Keycloak knows its
+  # public URL. Its bootstrap admin password comes from Vault (via .dev/).
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.0
-    depends_on:
-      pki:
-        condition: service_completed_successfully
+    entrypoint: ["/bin/bash", "-c", 'export KC_BOOTSTRAP_ADMIN_PASSWORD="$$(< /run/secrets/keycloak-admin)"; exec /opt/keycloak/bin/kc.sh "$$@"', "kc"]
     command: ["start-dev", "--import-realm"]
     environment:
       KC_HOSTNAME: https://auth.example.test
@@ -92,19 +106,34 @@ services:
       # to verify the BFF's certificate when it sends back-channel logouts
       KC_TRUSTSTORE_PATHS: /opt/keycloak/conf/truststores/example-test-ca.pem
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
     volumes:
       - ../conf/keycloak/demo-realm.json:/opt/keycloak/data/import/demo-realm.json:ro
-      - ../conf/pki/ca.pem:/opt/keycloak/conf/truststores/example-test-ca.pem:ro
+      - ../.dev/ca.pem:/opt/keycloak/conf/truststores/example-test-ca.pem:ro
+      - ../.dev/keycloak-admin:/run/secrets/keycloak-admin:ro
+    depends_on:
+      vault-init:
+        condition: service_completed_successfully
+
+  # One-shot: sets the client secrets in Keycloak to the ones in Vault.
+  keycloak-init:
+    <<: *python
+    command: ["python", "scripts/stack_init.py", "keycloak"]
+    environment:
+      VAULT_ADDR: http://vault:8200
+      KEYCLOAK_URL: http://keycloak:8080
+    depends_on:
+      keycloak:
+        condition: service_started
 
   # Resource servers behind the BFF (services/resource.py); each accepts only
-  # tokens exchanged for itself.
+  # tokens exchanged for itself, and reads only its own secret from Vault.
   service-a:
     <<: *service
     environment:
       <<: *service-env
       SERVICE_ID: service-a
-      SERVICE_SECRET: service-a-secret
+      SERVICE_SECRET: "vault:kv/service-a#client_secret"
+      VAULT_TOKEN_FILE: /workspace/.dev/tokens/service-a
       SERVICE_SCOPE: api-a
       PORT: "7001"
 
@@ -113,9 +142,11 @@ services:
     environment:
       <<: *service-env
       SERVICE_ID: service-b
-      SERVICE_SECRET: service-b-secret
+      SERVICE_SECRET: "vault:kv/service-b#client_secret"
+      VAULT_TOKEN_FILE: /workspace/.dev/tokens/service-b
       SERVICE_SCOPE: api-b
       PORT: "7002"
 
 volumes:
   claude-config:
+  vault-data:

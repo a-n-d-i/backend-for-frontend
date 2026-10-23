@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 from html import unescape
+from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 import requests
@@ -29,7 +30,18 @@ COOKIE_NAME = "__Host-Http-bff-session"
 CSRF = {"X-BFF-CSRF": "1"}
 USERNAME = "alice"
 PASSWORD = "alice-password"
-BFF_CLIENT = ("bff", "bff-secret")
+DEV = Path(__file__).resolve().parents[2] / ".dev"
+VAULT = os.environ.get("VAULT_ADDR", "http://vault:8200")
+
+
+def vault_read(path, token_name):
+    """A secret from Vault's KV engine, read with the token of component `token_name`."""
+    token = (DEV / "tokens" / token_name).read_text().strip()
+    return requests.get(f"{VAULT}/v1/{path}", headers={"X-Vault-Token": token}, timeout=5)
+
+
+# the BFF's client credentials, as the BFF reads them
+BFF_CLIENT = ("bff", vault_read("kv/bff", "bff").json()["data"]["client_secret"])
 REDIRECT_URI = f"{APP_URL}/bff/callback"
 TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"

@@ -678,7 +678,6 @@
       "enabled": true,
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "bff-secret",
       "redirectUris": [
         "https://app.example.test/bff/callback"
       ],
@@ -880,7 +879,6 @@
       "enabled": true,
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "service-a-secret",
       "redirectUris": [],
       "webOrigins": [],
       "notBefore": 0,
@@ -913,7 +911,6 @@
       "enabled": true,
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "service-b-secret",
       "redirectUris": [],
       "webOrigins": [],
       "notBefore": 0,

@@ -763,3 +763,31 @@ def test_back_channel_logout_is_traced_under_the_login_trace(tmp_path, provider,
     assert incoming["trace"] == "T7" and incoming["type"] == "incoming"
     assert incoming["req_body"] == "logout_token=t" and incoming["status"] == 200
     assert note["values"] == {"sid": "idp-sid-1"}
+
+
+# -- secrets from Vault (plugins/vault.py) ---------------------------------------------
+
+def test_client_secret_comes_from_vault(provider, monkeypatch):
+    seen = []
+    monkeypatch.setattr(tokenhandler.vault, "read", lambda ref, addr, token_file: seen.append(
+        (ref, addr, token_file)) or "from-vault")
+    created = []
+    monkeypatch.setattr(tokenhandler, "get_provider", lambda *args, **kwargs: created.append(args) or provider)
+
+    call("GET", "/bff/login", conf={"client_secret": "vault:kv/bff#client_secret",
+                                    "vault": {"addr": "http://vault:8200", "token_file": "/t/bff"}})
+
+    assert seen == [("vault:kv/bff#client_secret", "http://vault:8200", "/t/bff")]
+    assert created[0][2] == "from-vault"
+
+
+def test_unavailable_secrets_answer_503(monkeypatch):
+    def fail(*args):
+        raise tokenhandler.vault.VaultError("Vault answered 403 for kv/bff")
+    monkeypatch.setattr(tokenhandler.vault, "read", fail)
+
+    _, response = call("GET", "/bff/login", conf={"client_secret": "vault:kv/bff#client_secret",
+                                                  "vault": {"addr": "http://vault:8200", "token_file": "/t/bff"}})
+
+    assert response.get_status_code() == 503
+    assert body(response) == {"error": "secrets_unavailable"}

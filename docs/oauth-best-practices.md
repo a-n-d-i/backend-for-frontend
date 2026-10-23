@@ -27,6 +27,7 @@ The code comments cite the same sources with these short tags:
 | `OWASP OAuth2 #n` | [OWASP OAuth 2.0 Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/OAuth2_Cheat_Sheet.html), recommendation *n* in its order |
 | `OWASP Session` | [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html) |
 | `OWASP CSRF` | [OWASP CSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html) |
+| `OWASP Secrets` | [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html) |
 
 Status legend:
 
@@ -39,10 +40,11 @@ Status legend:
 ## Architecture
 
 All public traffic is HTTPS on real host names under `example.test` (RFC 6761). APISIX
-terminates TLS with the dev certificate from [`scripts/dev_pki.py`](../scripts/dev_pki.py):
+terminates TLS with a certificate from Vault's PKI engine, which it fetches from Vault:
 
 - **`https://app.example.test`**: the SPA, the BFF endpoints `/bff/*`, and the APIs `/api/a/*` and `/api/b/*`.
 - **`https://auth.example.test`**: Keycloak, realm `demo`.
+- **`https://vault.example.test`**: Vault, which holds every secret and the PKI (section 9).
 
 Login is a full-page navigation to `/bff/login`. The BFF, a confidential client, runs the
 authorization code flow with PKCE against Keycloak and validates the ID token. It keeps all
@@ -216,7 +218,7 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 | 12 | Refresh tokens sender-constrained or rotated. | ✅ | Rotation, and bound to the confidential client. |
 | 13–15 | Minimal privileges, audience-restricted tokens, resource servers check audience, scope and action on every request. | ✅ | See section 2. |
 | 16 | No resource owner password credentials grant. | ✅ | |
-| 17 | Client authentication, asymmetric preferred. | ✅ / ❌ | Client secrets. The secrets are in `conf/apisix.yaml`, the compose file and the realm file for the dev stack; production should inject them from a secret store. |
+| 17 | Client authentication, asymmetric preferred. | ✅ / ❌ | Client secrets, random, kept in Vault and read by each client with its own token (section 9). No asymmetric method yet. |
 | 18 | Clients can't influence `client_id` / `sub`; end-to-end TLS. | 🅰️ / ✅ | TLS: see RFC 9700 2.6. |
 | 19 | No authorization responses over unencrypted connections; no `http` redirect URIs. | ✅ | https redirect URI; plain http only redirects to https. |
 
@@ -260,11 +262,27 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 | `Referrer-Policy: no-referrer` | ✅ | SPA and BFF redirects. |
 | `Cache-Control: no-store` | ✅ | BFF and service responses. The SPA uses `no-cache` (revalidate), since it holds no user data. |
 
+## 9. OWASP Secrets Management Cheat Sheet
+
+All secrets of the stack and its PKI are in Vault: one server with persistent storage, set up by
+[`scripts/stack_init.py`](../scripts/stack_init.py) (`vault-init` and `keycloak-init` jobs).
+
+| Practice | Status | Where / why |
+|---|---|---|
+| Centralize secrets in a secrets manager instead of code, config files and images. | ✅ | KV engine `kv`: the client secrets of `bff`, `service-a` and `service-b`, Keycloak's admin password, the gateway's TLS key. None of them is in the repository or an image. `conf/apisix.yaml` references them (`$secret://vault/1/tls/…`, `vault:kv/bff#client_secret`), the realm file has no secrets, and the compose file only names Vault paths. |
+| Least privilege: each consumer gets access to its own secrets only. | ✅ | One policy and token per component (gateway, bff, service-a, service-b), read-only on its own path, without even Vault's default policy. Tested: no component can read another one's secret, write, or issue certificates (`tests/integration/test_vault.py`). |
+| Generate secrets with enough entropy; no default or shared values. | ✅ | `secrets.token_urlsafe(32)` per client, created once in Vault. The previous hard-coded `bff-secret` is refused by Keycloak (`test_keycloak_knows_the_client_secret_from_vault`). |
+| Short-lived credentials, rotation. | ✅ / partly | Component tokens expire after 32 days and are re-issued (the old ones revoked) on every start. The TLS certificate lives 90 days and is renewed 30 days before expiry. Consumers re-read secrets after a few minutes, so a rotated secret arrives without a restart. The client secrets themselves are not rotated automatically. |
+| Keep private keys in the secrets manager or an HSM; never export CA keys. | ✅ | The PKI engine generates the root CA key internally; it can't be read or exported, not even with the root token (`test_the_ca_key_stays_in_vault`). The CA is name-constrained to `example.test`. |
+| Secrets in transit are encrypted. | 🔧 | Vault listens on plain http, reachable only inside the Docker network (and through the gateway with TLS as `vault.example.test`). Production: a TLS listener. |
+| Secure the secrets manager itself: no root token at rest, auto-unseal, authenticate workloads by platform identity. | 🔧 | Dev stand-ins: the unseal key and root token are in `.dev/vault-init.json`, the component tokens in `.dev/tokens/` (gitignored, mode 600). Production: auto-unseal with a KMS/HSM, the root token revoked after setup, and Kubernetes or AppRole authentication instead of token files. |
+| Audit access to secrets. | ❌ | No Vault audit device is enabled; `vault audit enable file …` would log every access. |
+| Don't log secrets. | ✅ / 🔧 | The BFF and the services never log secrets, except in the dev-only traffic trace (see section 6). |
+
 ## Known limitations of the dev setup
 
-- **Dev PKI.** The certificates come from a local CA that you trust once. It is made per machine (`conf/pki/`, gitignored, never published), name-constrained to `example.test`, and its private key is discarded at creation, so a leak couldn't be abused for other domains. The server key stays on the machine; whoever had it could impersonate `*.example.test` to everyone trusting that CA (see the warning in the README).
-- **Plain http inside the Docker network.** See section 2.
-- **Secrets in config files.** Fine for the local stack. Production should load them from a secret store.
+- **Vault's root token and unseal key on disk** (`.dev/`, gitignored, never published). Whoever has them can read every secret and issue certificates that browsers trusting this CA accept for `*.example.test` (see the warning in the README).
+- **Plain http inside the Docker network** (also to Vault). See sections 2 and 9.
 - **In-memory sessions.** See section 6.
 - **Keycloak in dev mode** (`start-dev`, in-memory H2 database): the realm is re-imported on every fresh container, and sessions are lost on restart.
 - **Not yet used, though Keycloak supports them:** DPoP / mTLS-bound tokens and `private_key_jwt`.

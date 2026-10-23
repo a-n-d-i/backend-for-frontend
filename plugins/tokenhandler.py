@@ -35,7 +35,7 @@ from apisix.runner.http.request import Request
 from apisix.runner.http.response import Response
 from apisix.runner.plugin.core import PluginBase
 
-from apisix.plugins import trace
+from apisix.plugins import trace, vault
 from apisix.plugins.oidc import IdTokenError, OidcError, get_provider
 from apisix.plugins.sessions import Session, SessionStore
 
@@ -79,6 +79,10 @@ DEFAULTS = {
     # token for it is exchanged for. The allowlist of APIs [BBA 6.1.3.6]:
     # other paths are refused.
     "apis": {},
+    # Vault for secrets: {"addr": ..., "token_file": ...}. Any top-level value
+    # `vault:<path>#<field>` (e.g. client_secret) is read from there with this
+    # component's own token, see plugins/vault.py.
+    "vault": None,
     # DEV/TEST ONLY: file for the traffic trace of requests with X-Trace-Id,
     # see plugins/trace.py. Holds tokens in clear text.
     "trace_file": None,
@@ -118,7 +122,10 @@ class TokenHandler(PluginBase):
         """
         trace.start(conf["trace_file"], _header(request, trace.TRACE_HEADER))
         try:
-            Bff(conf, request, response).handle()
+            Bff(vault.resolve(conf, conf["vault"]), request, response).handle()
+        except vault.VaultError as e:
+            log.error("secrets unavailable: %s", e)
+            _json(response, 503, {"error": "secrets_unavailable"})
         except OidcError as e:
             log.error("authorization server error: %s", e)
             _json(response, 502, {"error": "authorization_server_unavailable"})

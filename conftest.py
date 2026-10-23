@@ -5,6 +5,6 @@ from pathlib import Path
 
 pytest_plugins = ["tests.traffic.recorder"]
 
-# requests uses its own CA bundle: trust the dev CA of *.example.test
-# (scripts/dev_pki.py) unless the environment says otherwise
-os.environ.setdefault("REQUESTS_CA_BUNDLE", str(Path(__file__).parent / "conf" / "pki" / "ca.pem"))
+# requests uses its own CA bundle: trust the dev CA of *.example.test (Vault's
+# PKI, exported by scripts/stack_init.py) unless the environment says otherwise
+os.environ.setdefault("REQUESTS_CA_BUNDLE", str(Path(__file__).parent / ".dev" / "ca.pem"))

@@ -24,7 +24,7 @@ A Vue SPA in `spa/` shows all of it.
 [docs/oauth-best-practices.md](docs/oauth-best-practices.md) lists the IETF and
 OWASP OAuth/OIDC best practices and where each is implemented, or why not.
 
-## Hosts and HTTPS
+## Hosts, HTTPS and secrets
 
 Everything runs on real names over HTTPS, in the reserved test domain
 `example.test`:
@@ -32,52 +32,70 @@ Everything runs on real names over HTTPS, in the reserved test domain
 | URL                          | what                                         |
 |------------------------------|----------------------------------------------|
 | <https://app.example.test>   | the SPA, the BFF (`/bff/*`), the APIs (`/api/a/*`, `/api/b/*`) |
-| <https://auth.example.test>  | Keycloak (realm `demo`, admin console with `admin` / `admin`) |
+| <https://auth.example.test>  | Keycloak (realm `demo`; admin `admin`, password in Vault at `kv/keycloak/admin`) |
+| <https://vault.example.test> | Vault UI (sign in with the root token from `.dev/vault-init.json`) |
+
+Secrets and the PKI live in [Vault](https://developer.hashicorp.com/vault). It
+is a single server with persistent storage (the `vault-data` volume), which the
+`vault-init` job (`scripts/stack_init.py`) initializes, unseals and sets up on
+every start:
+
+- **PKI engine `pki`:** a root CA whose private key never leaves Vault,
+  name-constrained to `example.test`. It issues the gateway's certificate for
+  `*.example.test` (90 days, renewed automatically). APISIX fetches that
+  certificate from Vault at the TLS handshake.
+- **KV engine `kv`:** random client secrets for `bff`, `service-a` and
+  `service-b`, and Keycloak's admin password. They are created once and never
+  written into the repository. The realm file contains no secrets; the
+  `keycloak-init` job sets them in Keycloak.
+- **One token per component** (gateway, bff, service-a, service-b), whose
+  policy allows reading only that component's own secrets. The tokens are
+  re-issued on every start.
 
 One-time setup on your machine:
 
 1. Add to `/etc/hosts` (Windows: `C:\Windows\System32\drivers\etc\hosts`):
 
    ```
-   127.0.0.1 app.example.test auth.example.test
+   127.0.0.1 app.example.test auth.example.test vault.example.test
    ```
 
-2. Start the stack once. Its `pki` service creates the dev PKI in `conf/pki/`
-   (`scripts/dev_pki.py`): a CA and a certificate for `*.example.test`. The PKI
-   is made per machine and is never in the repository.
+2. Start the stack once. `vault-init` writes the public CA certificate to
+   `.dev/ca.pem`.
 
-3. Trust `conf/pki/ca.pem` in your browser's or OS's certificate settings, as
-   an authority for websites. Inside the dev container it is trusted
-   automatically.
+3. Trust `.dev/ca.pem` in your browser's or OS's certificate settings, as an
+   authority for websites. Inside the dev container it is trusted
+   automatically. The CA lives in Vault's volume, so you import it once.
 
 User: `alice` / `alice-password`.
 
-> **Warning: never commit or publish `conf/pki/`.** It is in `.gitignore`;
-> keep it that way.
+> **Warning: never commit or publish `.dev/`.** It is in `.gitignore`; keep it
+> that way. It holds:
+> - Vault's unseal key and root token (`vault-init.json`), with which anyone can
+>   read every secret and issue certificates for `*.example.test`;
+> - the component tokens;
+> - Keycloak's admin password.
 >
 > A CA in your browser's trust store vouches for every certificate made with
-> its key. If those keys were public, for example in a GitHub repository,
-> anyone could impersonate the sites it covers to you, without a browser
-> warning.
+> its key. If that key, or Vault's root token, were public, for example in a
+> GitHub repository, anyone could impersonate the sites the CA covers to you,
+> without a browser warning.
 >
 > This setup limits the damage in two ways:
+> - The CA's key never leaves Vault, not even for the root token.
 > - The CA is name-constrained to `example.test`, so it can't vouch for any
 >   other domain.
-> - Its private key is discarded the moment the certificate is made, so no
->   further certificate can be issued with it.
->
-> The server key `conf/pki/server-key.pem` still lets anyone who has it
-> impersonate `*.example.test` to everyone who trusts this CA. Keep it on your
-> machine.
 >
 > Never trust a CA whose key someone else has (including one from another
 > project's repository). Remove this CA from your trust store when you no
 > longer need it.
+>
+> For production: auto-unseal with a KMS/HSM, no root token at rest, and a
+> platform auth method (Kubernetes, AppRole) instead of token files.
 
-The server certificate is valid for 397 days, and the `pki` service renews it
-30 days before it expires. To rotate everything now, run
-`python scripts/dev_pki.py --force`, restart the stack, and import the new
-`ca.pem`.
+To start over with a new CA and new secrets, run `docker compose down -v` in
+`.devcontainer/` (this deletes the `vault-data` volume), delete `.dev/`, start
+again, and re-import the CA.
 
 ## BFF endpoints
 
@@ -104,17 +122,19 @@ Container** or `docker compose up -d --build` in `.devcontainer/`.
 
 The container *is* the gateway: APISIX 3.19 (standalone, no etcd) runs in it,
 spawns the python runner, and listens on 80 (redirects only) and 443, both
-published to the host. At start, `.devcontainer/gateway-entrypoint.sh` loads
-the certificate from `conf/pki` (referenced as `$env://…` in
-`conf/apisix.yaml`) and trusts the dev CA inside the container. The compose
-stack adds:
+published to the host. At start, `.devcontainer/gateway-entrypoint.sh` hands
+APISIX its Vault token and trusts the CA of Vault's PKI inside the container.
+The compose stack adds:
+
+- **`vault`**, plus the one-shot jobs **`vault-init`** and **`keycloak-init`**
+  (see above).
 
 - **`keycloak`**: Keycloak 26.8 in dev mode, behind the gateway. The realm
   is imported from `conf/keycloak/demo-realm.json` on every fresh start.
 - **`service-a`, `service-b`**: the resource servers (`services/resource.py`).
 
-`app.example.test` and `auth.example.test` are network aliases of the
-gateway, so inside the stack every component uses the same public HTTPS URLs
+`app.example.test`, `auth.example.test` and `vault.example.test` are network
+aliases of the gateway, so inside the stack every component uses the same public HTTPS URLs
 as your browser.
 
 The SPA is served by a static server block in the gateway's nginx
@@ -131,21 +151,23 @@ The container user's uid/gid default to 1000. If yours differ, export
 .devcontainer/          image, compose stack, VS Code settings
 conf/config.yaml        APISIX static config incl. the SPA server (`make reload`)
 conf/apisix.yaml        routes and BFF config, hot reloaded on save
-conf/keycloak/          realm: clients, scopes, user (restart the keycloak container)
-conf/pki/               dev CA and certificate for *.example.test, per machine, gitignored
+conf/keycloak/          realm: clients, scopes, user, no secrets (restart the keycloak container)
+conf/vault/             Vault server config
+.dev/                   written by vault-init: CA certificate, tokens, unseal key; gitignored
 plugins/                mounted as the runner's `apisix.plugins` package
   tokenhandler.py       the BFF: endpoints, cookies, CSRF checks, token exchange, API proxying
   oidc.py               OIDC client: discovery, token endpoint, token exchange,
                         ID and logout token validation
   sessions.py           server-side session store (in memory)
+  vault.py              reads `vault:<path>#<field>` secrets with the component's own token
   trace.py              dev-only traffic trace for the test report
 services/               the resource servers Service A and B
 spa/                    the Vue SPA (no build step, vendored Vue runtime)
-scripts/dev_pki.py      creates conf/pki (run by the `pki` service), --force rotates
+scripts/stack_init.py   vault-init / keycloak-init: Vault setup, PKI, secrets, tokens
 docs/                   OAuth/OIDC best practices and where they are implemented
 traffic-report/         generated by the tests: sequence diagrams of their traffic
 tests/unit/             plugin and service tests, no stack needed
-tests/integration/      login, routing, token exchange, zero trust, SSO/SLO against the running stack
+tests/integration/      login, routing, token exchange, zero trust, SSO/SLO, Vault against the running stack
 tests/e2e/              the SPA in headless Chromium (Playwright)
 tests/traffic/          pytest plugin recording the traffic, report renderer
 ```

@@ -96,7 +96,7 @@ _current: Optional[Recording] = None
 
 
 # lanes of the sequence diagrams, by host (public name or the one inside Docker)
-HOST_LANES = {"auth.example.test": "keycloak", "keycloak": "keycloak",
+HOST_LANES = {"auth.example.test": "keycloak", "keycloak": "keycloak", "vault": "vault", "vault.example.test": "vault",
               "service-a": "service-a", "service-b": "service-b"}
 # lane of each component writing to the trace
 SOURCE_LANES = {"bff": "gw", "service-a": "service-a", "service-b": "service-b"}

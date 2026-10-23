@@ -37,6 +37,7 @@ LANES = [
     ("browser", "Browser"),
     ("gw", "Gateway · BFF"),
     ("keycloak", "Keycloak"),
+    ("vault", "Vault"),
     ("service-a", "Service A"),
     ("service-b", "Service B"),
 ]

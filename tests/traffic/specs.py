@@ -21,6 +21,7 @@ OWASP = {
     "OWASP Session": "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html",
     "OWASP CSRF": "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html",
     "OWASP Headers": "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html",
+    "OWASP Secrets": "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html",
 }
 
 
@@ -216,6 +217,12 @@ def annotate(ex, cookie_prefix="__Host-") -> list:
         add("Back-channel logout: Keycloak POSTs a signed logout token (sid, events, no nonce) to the BFF, "
             "server to server, when the SSO session ends. The BFF validates it and ends the matching "
             "sessions; 200, not cached.", "OIDC BCL 2.5", "OIDC BCL 2.6", "OIDC BCL 2.8")
+
+    # -- secrets ----------------------------------------------------------------------
+    if ex.dst == "vault" and path.startswith("/v1/kv/"):
+        add("Secret read from Vault with this component's own token; its policy allows reading only this "
+            "component's secrets. Cached for a few minutes, so a rotated secret arrives without a restart.",
+            "OWASP Secrets")
 
     # -- the services -----------------------------------------------------------------
     if to_service:

@@ -57,9 +57,10 @@ RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt \
     && playwright install --with-deps chromium \
     && chown -R apisix:apisix "${VIRTUAL_ENV}" "${PLAYWRIGHT_BROWSERS_PATH}"
 
-# The dev PKI (conf/pki, per machine, gitignored) is not baked into the image:
-# gateway-entrypoint.sh loads the TLS certificate and trusts the dev CA at
-# start. requests uses its own CA bundle unless pointed at the system one.
+# Secrets and the PKI live in Vault, nothing is baked into the image:
+# gateway-entrypoint.sh hands APISIX its Vault token and trusts the CA of
+# Vault's PKI at start (both from .dev/, written by the vault-init job).
+# requests uses its own CA bundle unless pointed at the system one.
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 COPY --chmod=755 .devcontainer/gateway-entrypoint.sh /usr/local/bin/gateway-entrypoint.sh
 
