@@ -1,0 +1,75 @@
+# Declarative routes, reloaded automatically when this file changes.
+plugin_configs:
+  # The token handler (BFF), shared by the /bff and /api routes so both use
+  # the same configuration. `value` is passed to TokenHandler.config() as a
+  # raw JSON string; see DEFAULTS in plugins/tokenhandler.py for the options.
+  # The client secret matches conf/dex.yaml; in production it would come from
+  # a secret store instead of this file.
+  # DEV ONLY: trace_file records requests that carry X-Trace-Id (only the
+  # tests send it) for the traffic report, tokens included. Never set it in
+  # production.
+  - id: bff
+    plugins:
+      ext-plugin-pre-req:
+        conf:
+          - name: tokenhandler
+            value: |
+              {
+                "issuer": "http://localhost:9080/dex",
+                "client_id": "tokenhandler",
+                "client_secret": "tokenhandler-secret",
+                "redirect_uri": "http://localhost:9080/bff/callback",
+                "allow_insecure_http": true,
+                "trace_file": "/workspace/traffic-report/bff-trace.jsonl"
+              }
+
+routes:
+  # OIDC provider, see dex.yaml; issuer is http://localhost:9080/dex
+  - id: dex
+    uri: /dex/*
+    priority: 10
+    upstream:
+      type: roundrobin
+      nodes:
+        "dex:5556": 1
+
+  # BFF endpoints: login, callback, session, logout. Answered by the plugin,
+  # nothing reaches the upstream.
+  - id: bff
+    uri: /bff/*
+    plugin_config_id: bff
+    upstream:
+      type: roundrobin
+      nodes:
+        "httpbin:8080": 1
+
+  # The API behind the BFF: requests need the session cookie, the plugin
+  # swaps it for the access token. This route is the allowlist of what the
+  # BFF proxies to (BBA 6.1.3.6).
+  - id: api
+    uri: /api/*
+    plugin_config_id: bff
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/(.*)", "/$1"]
+      # httpbin echoes the request, including the Authorization header the
+      # BFF added. Redact it so the demo does not hand the token to the
+      # browser after all; a real API would not echo it.
+      response-rewrite:
+        filters:
+          - regex: 'Bearer [A-Za-z0-9._~+/=-]+'
+            scope: global
+            replace: "Bearer [redacted]"
+    upstream:
+      type: roundrobin
+      nodes:
+        "httpbin:8080": 1
+
+  # The Vue SPA, static files served by the server block in config.yaml.
+  - id: spa
+    uri: /*
+    upstream:
+      type: roundrobin
+      nodes:
+        "127.0.0.1:9081": 1
+#END

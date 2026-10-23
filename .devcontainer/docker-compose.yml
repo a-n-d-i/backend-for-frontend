@@ -1,0 +1,34 @@
+name: apisix-tokenhandler
+
+services:
+  apisix:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+      args:
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    environment:
+      APISIX_STAND_ALONE: "true"
+    volumes:
+      - ..:/workspace:cached
+      - claude-config:/home/apisix/.claude
+    ports:
+      - "9080:9080"
+    depends_on:
+      - httpbin
+      - dex
+
+  # echo upstream: returns the request it received as JSON
+  httpbin:
+    image: mccutchen/go-httpbin:2.26.0
+
+  # OIDC provider with a login form, see conf/dex.yaml
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ../conf/dex.yaml:/etc/dex/config.yaml:ro
+
+volumes:
+  claude-config:

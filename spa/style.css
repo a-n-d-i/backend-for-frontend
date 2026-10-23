@@ -1,0 +1,79 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1d1d1f;
+  --muted: #6b6b70;
+  --bg: #f6f6f8;
+  --card: #ffffff;
+  --border: #dedee3;
+  --accent: #2f5bd3;
+  --error: #b42318;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #ececf0;
+    --muted: #a0a0a8;
+    --bg: #16161a;
+    --card: #202026;
+    --border: #34343c;
+    --accent: #7c9cff;
+    --error: #ff8a80;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 system-ui, sans-serif;
+}
+
+main {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+h1 { margin-bottom: 0.25rem; }
+h2 { font-size: 1rem; margin: 1.5rem 0 0.25rem; }
+.lead, .hint { color: var(--muted); }
+.hint { font-size: 0.875rem; margin-top: 0; }
+.error { color: var(--error); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  font-size: 0.875rem;
+}
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+
+.actions { display: flex; gap: 0.5rem; }
+
+button {
+  font: inherit;
+  padding: 0.4rem 1rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+button.secondary { background: transparent; color: var(--accent); }
+
+pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-size: 0.8125rem;
+}

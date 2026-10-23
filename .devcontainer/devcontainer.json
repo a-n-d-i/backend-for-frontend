@@ -1,0 +1,29 @@
+{
+  "name": "APISIX tokenhandler",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "apisix",
+  "workspaceFolder": "/workspace",
+  // keep the image's CMD so APISIX runs in the foreground of the container
+  "overrideCommand": false,
+  "remoteUser": "apisix",
+  // the uid is set at build time in the Dockerfile
+  "updateRemoteUserUID": false,
+  "forwardPorts": [9080],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/venv/bin/python",
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestArgs": ["tests"]
+      }
+    }
+  }
+}

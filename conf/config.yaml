@@ -1,0 +1,40 @@
+# APISIX static config. Changes need `make reload` (or a container restart).
+deployment:
+  role: data_plane
+  role_data_plane:
+    config_provider: yaml   # routes come from apisix.yaml, no etcd
+
+apisix:
+  node_listen: 9080
+
+nginx_config:
+  error_log_level: warn
+  # Static server for the Vue SPA in spa/, reached through the `spa` route.
+  # Loopback only: the browser gets it via APISIX on 9080, same origin as
+  # the BFF, which is what lets the BFF use SameSite=Strict cookies and
+  # refuse every cross-origin request.
+  http_configuration_snippet: |
+    server {
+        listen 127.0.0.1:9081;
+        root /workspace/spa;
+        access_log off;
+
+        location / {
+            # client-side routing: unknown paths get the app
+            try_files $uri /index.html;
+            add_header Cache-Control no-cache;
+            # Strict CSP: only our own scripts, no inline code, no eval (the
+            # SPA uses Vue's runtime-only build). Limits what injected markup
+            # can do, though the BFF does not rely on it to keep tokens away
+            # [BBA 6.1.4]. frame-ancestors + X-Frame-Options: no clickjacking.
+            add_header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" always;
+            add_header X-Frame-Options DENY always;
+            add_header X-Content-Type-Options nosniff always;
+            add_header Referrer-Policy no-referrer always;
+        }
+    }
+
+# APISIX spawns the runner itself and talks to it over a unix socket
+# (APISIX_LISTEN_ADDRESS). It restarts the runner when it exits.
+ext-plugin:
+  cmd: ["/opt/venv/bin/python", "/opt/apisix-python-plugin-runner/bin/py-runner", "start"]

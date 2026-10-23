@@ -1,0 +1,41 @@
+# Dex OIDC provider. Reached through APISIX (route `dex` in apisix.yaml), so
+# the issuer is the same URL for the browser on the host and for the tests in
+# the container. Changes need a restart of the dex container.
+issuer: http://localhost:9080/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+# Short-lived access/ID tokens; refresh tokens rotate on every use and die
+# when idle or old, like the BFF session (BBA 6.1.2.2, RFC 9700 4.14).
+expiry:
+  idTokens: "10m"
+  refreshTokens:
+    disableRotation: false
+    reuseInterval: "3s"
+    validIfNotUsedFor: "30m"
+    absoluteLifetime: "8h"
+
+oauth2:
+  # go straight back to the client after login, no consent page
+  skipApprovalScreen: true
+
+staticClients:
+  - id: tokenhandler
+    name: APISIX tokenhandler
+    secret: tokenhandler-secret
+    # the BFF's callback; Dex matches it exactly [RFC 9700 2.1]
+    redirectURIs:
+      - http://localhost:9080/bff/callback
+
+# Dex's own login form, backed by the static users below
+enablePasswordDB: true
+staticPasswords:
+  - email: admin@example.com
+    # bcrypt of "password"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: admin
+    userID: 08a8684b-db88-4b73-90a9-3cd1661f5466

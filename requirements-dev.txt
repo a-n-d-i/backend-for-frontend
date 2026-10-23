@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest==8.4.2
+requests==2.32.5
+ruff==0.14.0
+# browser tests of the SPA (tests/e2e)
+playwright==1.55.0
+pytest-playwright==0.7.1
