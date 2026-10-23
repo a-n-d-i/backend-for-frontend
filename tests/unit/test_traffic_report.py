@@ -5,8 +5,8 @@ from tests.traffic.specs import annotate, ref_url
 
 
 def exchange(url, method="GET", req_headers=(), req_body=None, status=200, resp_headers=(), resp_body="",
-             source="test", t_start=0.0, t_end=1.0):
-    return Exchange(source, "browser", "gw", method, url, list(req_headers), req_body, status, "",
+             source="test", src="browser", dst="gw", t_start=0.0, t_end=1.0):
+    return Exchange(source, src, dst, method, url, list(req_headers), req_body, status, "",
                     list(resp_headers), resp_body, t_start, t_end)
 
 
@@ -81,6 +81,7 @@ def test_ref_urls():
     assert ref_url("BBA 6.1.3.2").endswith("draft-ietf-oauth-browser-based-apps-27#section-6.1.3.2")
     assert ref_url("OIDC Core 3.1.3.7").endswith("#IDTokenValidation")
     assert ref_url("OWASP CSRF").startswith("https://cheatsheetseries.owasp.org/")
+    assert ref_url("OIDC BCL 2.6") == "https://openid.net/specs/openid-connect-backchannel-1_0.html"
 
 
 def refs_of(ex):
@@ -98,11 +99,35 @@ def test_authorization_request_redirect_is_annotated():
 
 
 def test_token_request_is_annotated():
-    ex = exchange("http://h/dex/token", method="POST", source="bff",
+    ex = exchange("https://auth.example.test/realms/demo/protocol/openid-connect/token", method="POST",
+                  source="bff", src="gw", dst="keycloak",
                   req_body="grant_type=authorization_code&code=c&redirect_uri=r&code_verifier=v",
                   resp_body='{"access_token": "a", "token_type": "bearer"}')
 
     assert {"RFC 6749 4.1.3", "RFC 7636 4.5", "RFC 6749 2.3.1", "RFC 6749 5.1"} <= refs_of(ex)
+
+
+def test_token_exchange_is_annotated():
+    ex = exchange("https://auth.example.test/realms/demo/protocol/openid-connect/token", method="POST",
+                  source="bff", src="gw", dst="keycloak",
+                  req_body="grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&audience=service-a",
+                  resp_body='{"access_token": "a", "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"}')
+
+    assert {"RFC 8693 2.1", "RFC 8693 2.2.1", "RFC 9700 2.3"} <= refs_of(ex)
+
+
+def test_service_rejection_is_annotated():
+    ex = exchange("http://service-b:7002/whoami", src="gw", dst="service-b", status=401,
+                  resp_headers=[("WWW-Authenticate", 'Bearer error="invalid_token"')])
+
+    assert "RFC 6750 3.1" in refs_of(ex)
+
+
+def test_back_channel_logout_is_annotated():
+    ex = exchange("https://app.example.test/bff/backchannel-logout", method="POST", source="keycloak",
+                  src="keycloak", dst="gw", req_body="logout_token=x")
+
+    assert {"OIDC BCL 2.5", "OIDC BCL 2.6"} <= refs_of(ex)
 
 
 def test_csrf_refusal_is_annotated():

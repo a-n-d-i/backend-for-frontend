@@ -1,6 +1,35 @@
 name: apisix-tokenhandler
 
+# Every component reaches every other one by its public name over https,
+# through the gateway, as in production: app.example.test and
+# auth.example.test are network aliases of the gateway, so they resolve to it
+# inside the stack as well. On the host, add to /etc/hosts:
+#   127.0.0.1 app.example.test auth.example.test
+# TLS uses the dev certificate from scripts/dev_pki.py (conf/pki).
+
+x-service: &service
+  build:
+    context: ..
+    dockerfile: .devcontainer/services.Dockerfile
+  user: "${USER_UID:-1000}:${USER_GID:-1000}"
+  working_dir: /workspace
+  command: ["python", "-m", "services.resource"]
+  volumes:
+    # the code, and traffic-report/ for the dev trace
+    - ..:/workspace
+  depends_on:
+    - keycloak
+
+x-service-env: &service-env
+  ISSUER: https://auth.example.test/realms/demo
+  # trust anchor for Keycloak's certificate
+  SSL_CERT_FILE: /workspace/conf/pki/ca.pem
+  # DEV ONLY: traffic trace for the test report (holds tokens)
+  TRACE_FILE: /workspace/traffic-report/bff-trace.jsonl
+  PYTHONUNBUFFERED: "1"
+
 services:
+  # The gateway (APISIX + tokenhandler BFF) and the dev container in one.
   apisix:
     build:
       context: ..
@@ -14,21 +43,55 @@ services:
       - ..:/workspace:cached
       - claude-config:/home/apisix/.claude
     ports:
-      - "9080:9080"
+      - "80:80"
+      - "443:443"
+    networks:
+      default:
+        aliases:
+          - app.example.test
+          - auth.example.test
     depends_on:
-      - httpbin
-      - dex
+      - keycloak
+      - service-a
+      - service-b
 
-  # echo upstream: returns the request it received as JSON
-  httpbin:
-    image: mccutchen/go-httpbin:2.26.0
-
-  # OIDC provider with a login form, see conf/dex.yaml
-  dex:
-    image: ghcr.io/dexidp/dex:v2.41.1
-    command: ["dex", "serve", "/etc/dex/config.yaml"]
+  # Authorization server; realm, clients and user in conf/keycloak/demo-realm.json.
+  # Behind the gateway: TLS ends there, Keycloak knows its public URL.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_HOSTNAME: https://auth.example.test
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      # to verify the BFF's certificate when it sends back-channel logouts
+      KC_TRUSTSTORE_PATHS: /opt/keycloak/conf/truststores/example-test-ca.pem
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
     volumes:
-      - ../conf/dex.yaml:/etc/dex/config.yaml:ro
+      - ../conf/keycloak/demo-realm.json:/opt/keycloak/data/import/demo-realm.json:ro
+      - ../conf/pki/ca.pem:/opt/keycloak/conf/truststores/example-test-ca.pem:ro
+
+  # Resource servers behind the BFF (services/resource.py); each accepts only
+  # tokens exchanged for itself.
+  service-a:
+    <<: *service
+    environment:
+      <<: *service-env
+      SERVICE_ID: service-a
+      SERVICE_SECRET: service-a-secret
+      SERVICE_SCOPE: api-a
+      PORT: "7001"
+
+  service-b:
+    <<: *service
+    environment:
+      <<: *service-env
+      SERVICE_ID: service-b
+      SERVICE_SECRET: service-b-secret
+      SERVICE_SCOPE: api-b
+      PORT: "7002"
 
 volumes:
   claude-config:

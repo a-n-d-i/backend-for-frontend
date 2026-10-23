@@ -13,7 +13,7 @@ USER root
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3 python3-venv git make sudo curl ca-certificates procps less \
+        python3 python3-venv git make sudo curl ca-certificates procps less libnss3-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Re-map the image's apisix user (uid 636) to the host uid and give it a real
@@ -57,6 +57,13 @@ RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt \
     && playwright install --with-deps chromium \
     && chown -R apisix:apisix "${VIRTUAL_ENV}" "${PLAYWRIGHT_BROWSERS_PATH}"
 
+# Trust the dev CA of *.example.test (scripts/dev_pki.py; name-constrained to
+# example.test, its key discarded). System-wide for curl and Python; requests
+# uses its own bundle unless told otherwise. Rebuild after rotating the PKI.
+COPY conf/pki/ca.pem /usr/local/share/ca-certificates/example-test-dev-ca.crt
+RUN update-ca-certificates
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 # APISIX reads its config straight from the workspace; apisix.yaml (routes) is
 # hot reloaded, config.yaml needs a container restart.
 RUN ln -sf /workspace/conf/config.yaml /usr/local/apisix/conf/config.yaml \
@@ -73,3 +80,9 @@ ENV PATH=/home/apisix/.local/bin:$PATH \
 RUN mkdir -p "${CLAUDE_CONFIG_DIR}" \
     && curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
+
+# Chromium (Playwright tests) reads trust anchors from the user's NSS database
+RUN mkdir -p /home/apisix/.pki/nssdb \
+    && certutil -d sql:/home/apisix/.pki/nssdb -N --empty-password \
+    && certutil -d sql:/home/apisix/.pki/nssdb -A -t "C,," -n "example.test dev CA" \
+        -i /usr/local/share/ca-certificates/example-test-dev-ca.crt

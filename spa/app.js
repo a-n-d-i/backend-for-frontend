@@ -13,6 +13,9 @@ import { createApp, h, onMounted, ref } from "/vendor/vue.runtime.esm-browser.pr
 // send it without a CORS preflight the BFF never grants (CSRF defense).
 const CSRF_HEADER = { "X-BFF-CSRF": "1" };
 
+// another application of the same Keycloak realm, to show single sign-on and single logout
+const ACCOUNT_CONSOLE = "https://auth.example.test/realms/demo/account/";
+
 async function bff(path, options = {}) {
   const resp = await fetch(path, {
     ...options,
@@ -44,16 +47,19 @@ const App = {
       window.location.assign("/bff/login?return_to=" + encodeURIComponent(returnTo));
     }
 
-    async function callApi() {
+    // Service A and Service B: the BFF exchanges the session's token for one
+    // that only the called service accepts.
+    async function callApi(service) {
       error.value = null;
-      const { status, body } = await bff("/api/headers");
+      const path = `/api/${service}/whoami`;
+      const { status, body } = await bff(path);
       if (status === 401) {
-        // session gone (expired, logged out elsewhere): back to logged out
+        // session gone (expired, logged out here or at Keycloak): back to logged out
         user.value = null;
         apiResult.value = null;
         return;
       }
-      apiResult.value = { status, body };
+      apiResult.value = { path, status, body };
     }
 
     async function logout() {
@@ -82,7 +88,8 @@ const App = {
     return () => h("main", [
       h("h1", "Token handler demo"),
       h("p", { class: "lead" },
-        "A Vue SPA logged in through a Backend for Frontend. Tokens stay in the gateway."),
+        "A Vue SPA logged in through a Backend for Frontend. Tokens stay in the gateway; " +
+        "each service gets a token only it accepts."),
       error.value && h("p", { class: "error", "data-testid": "error" }, error.value),
       loading.value
         ? h("p", "Checking session…")
@@ -103,15 +110,22 @@ const App = {
         ]),
         h("dl", Object.entries(u).flatMap(([k, v]) => [h("dt", k), h("dd", String(v))])),
         h("div", { class: "actions" }, [
-          h("button", { onClick: callApi, "data-testid": "call-api" }, "Call API"),
+          h("button", { onClick: () => callApi("a"), "data-testid": "call-api-a" }, "Call service A"),
+          h("button", { onClick: () => callApi("b"), "data-testid": "call-api-b" }, "Call service B"),
           h("button", { onClick: logout, class: "secondary", "data-testid": "logout" }, "Log out"),
         ]),
         apiResult.value && h("div", { class: "api" }, [
-          h("h2", `GET /api/headers → ${apiResult.value.status}`),
+          h("h2", `GET ${apiResult.value.path} → ${apiResult.value.status}`),
           h("p", { class: "hint" },
-            "The upstream echoes the headers it received: the BFF added the bearer token " +
-            "(redacted by the gateway on the way back) and dropped the session cookie."),
+            "The service checked a token that was exchanged for it alone; it lists the headers it " +
+            "received: a bearer token, no session cookie."),
           h("pre", { "data-testid": "api-result" }, JSON.stringify(apiResult.value.body, null, 2)),
+        ]),
+        h("p", { class: "hint" }, [
+          "Single sign-on: the ",
+          h("a", { href: ACCOUNT_CONSOLE, target: "_blank", "data-testid": "account-console" },
+            "Keycloak account console"),
+          " opens without a password. Signing out there logs you out here too (back-channel logout).",
         ]),
       ]);
     }

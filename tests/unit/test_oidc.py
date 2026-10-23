@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -230,3 +231,94 @@ def test_redirects_are_not_followed(http_provider, monkeypatch):
     with pytest.raises(OidcError, match="307"):
         http_provider.refresh("rt")
     assert len(TokenEndpoint.requests) == 1
+
+
+def test_token_exchange_request(http_provider, monkeypatch):
+    monkeypatch.setattr(TokenEndpoint, "reply", {
+        "access_token": "a-token", "token_type": "Bearer",
+        "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"})
+
+    tokens = http_provider.exchange_token("subject", "service-a", "api-a")
+
+    assert tokens["access_token"] == "a-token"
+    (headers, form), = TokenEndpoint.requests
+    assert headers["Authorization"].startswith("Basic ")
+    assert form == {
+        "grant_type": ["urn:ietf:params:oauth:grant-type:token-exchange"],
+        "subject_token": ["subject"],
+        "subject_token_type": ["urn:ietf:params:oauth:token-type:access_token"],
+        "requested_token_type": ["urn:ietf:params:oauth:token-type:access_token"],
+        "audience": ["service-a"],
+        "scope": ["api-a"],
+    }
+
+
+def test_token_exchange_must_issue_an_access_token(http_provider, monkeypatch):
+    monkeypatch.setattr(TokenEndpoint, "reply", {
+        "access_token": "x", "token_type": "Bearer", "issued_token_type": "urn:ietf:params:oauth:token-type:id_token"})
+
+    with pytest.raises(OidcError, match="not an access token"):
+        http_provider.exchange_token("subject", "service-a", "api-a")
+
+
+# -- back-channel logout token [OIDC Back-Channel Logout 1.0, 2.6] -------------------------
+
+def logout_token(key=KEY, typ="logout+jwt", **overrides):
+    now = int(time.time())
+    claims = {"iss": ISSUER, "aud": "bff", "iat": now, "exp": now + 120, "jti": base64.b64encode(os.urandom(9)).decode(),
+              "sid": "s1", "sub": "u1", "events": {"http://schemas.openid.net/event/backchannel-logout": {}}}
+    claims.update(overrides)
+    claims = {k: v for k, v in claims.items() if v is not None}
+    return jwt.encode(claims, key, algorithm="RS256", headers={"typ": typ} if typ else None)
+
+
+def test_valid_logout_token(provider):
+    claims = provider.validate_logout_token(logout_token())
+
+    assert (claims["sid"], claims["sub"]) == ("s1", "u1")
+
+
+def test_logout_token_with_only_sub_or_only_sid(provider):
+    provider.validate_logout_token(logout_token(sid=None))
+    provider.validate_logout_token(logout_token(sub=None))
+
+
+def test_logout_token_cannot_be_replayed(provider):
+    token = logout_token()
+    provider.validate_logout_token(token)
+
+    with pytest.raises(IdTokenError, match="replayed"):
+        provider.validate_logout_token(token)
+
+
+@pytest.mark.parametrize("overrides, error", [
+    ({"events": None}, "logout event"),
+    ({"events": {"http://schemas.openid.net/event/backchannel-logout": "x"}}, "logout event"),
+    ({"events": {"something-else": {}}}, "logout event"),
+    ({"nonce": "n"}, "nonce"),
+    ({"sid": None, "sub": None}, "neither sid nor sub"),
+    ({"aud": "other-client"}, "invalid logout token"),
+    ({"iss": "https://evil.example"}, "invalid logout token"),
+    ({"jti": None}, "invalid logout token"),
+    ({"iat": None}, "invalid logout token"),
+    ({"iat": int(time.time()) - 3600, "exp": int(time.time()) + 60}, "too old"),
+    ({"exp": int(time.time()) - 3600}, "invalid logout token"),
+], ids=lambda v: str(v)[:40])
+def test_invalid_logout_tokens(provider, overrides, error):
+    with pytest.raises(IdTokenError, match=error):
+        provider.validate_logout_token(logout_token(**overrides))
+
+
+def test_logout_token_signed_by_another_key(provider):
+    with pytest.raises(IdTokenError):
+        provider.validate_logout_token(logout_token(key=OTHER_KEY))
+
+
+def test_other_jwt_types_are_no_logout_tokens(provider):
+    with pytest.raises(IdTokenError, match="typ"):
+        provider.validate_logout_token(logout_token(typ="at+jwt"))
+
+
+def test_id_token_is_no_logout_token(provider):
+    with pytest.raises(IdTokenError):
+        provider.validate_logout_token(id_token(aud="bff"))

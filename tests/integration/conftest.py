@@ -2,48 +2,46 @@ import time
 
 import pytest
 import requests
-from bff_client import GATEWAY_URL, Browser, start_login, submit_login
+from bff_client import APP_URL, ISSUER, Browser, log_in
+
+
+def _wait_for(url, ok, what, timeout=90):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            resp = requests.get(url, timeout=3)
+            if ok(resp):
+                return resp
+            detail = resp.status_code
+        except requests.ConnectionError as e:
+            detail = e
+        if time.monotonic() > deadline:
+            pytest.fail(f"{what} not reachable at {url}: {detail}")
+        time.sleep(1)
 
 
 @pytest.fixture(scope="session")
 def gateway():
-    """Base URL of the running APISIX, waiting until it proxies requests."""
-    deadline = time.monotonic() + 30
-    while True:
-        try:
-            if requests.get(f"{GATEWAY_URL}/bff/session", timeout=2).status_code == 403:
-                return GATEWAY_URL
-        except requests.ConnectionError:
-            pass
-        if time.monotonic() > deadline:
-            pytest.fail(f"APISIX with the tokenhandler not reachable at {GATEWAY_URL}")
-        time.sleep(1)
+    """Base URL of the app, waiting until APISIX answers with the BFF."""
+    _wait_for(f"{APP_URL}/bff/session", lambda r: r.status_code == 403, "APISIX with the tokenhandler")
+    return APP_URL
 
 
 @pytest.fixture(scope="session")
 def oidc(gateway):
-    """Discovery document of Dex, proxied by APISIX under /dex."""
-    deadline = time.monotonic() + 10
-    while True:
-        resp = requests.get(f"{gateway}/dex/.well-known/openid-configuration", timeout=2)
-        if resp.status_code == 200:
-            return resp.json()
-        if time.monotonic() > deadline:
-            pytest.fail(f"Dex not reachable through APISIX: {resp.status_code} (is the dex container running?)")
-        time.sleep(1)
+    """Discovery document of Keycloak (it starts slowly)."""
+    return _wait_for(f"{ISSUER}/.well-known/openid-configuration", lambda r: r.status_code == 200,
+                     "Keycloak (is the keycloak container running?)").json()
 
 
 @pytest.fixture
-def browser(gateway):
+def browser(gateway, oidc):
     with Browser() as b:
         yield b
 
 
 @pytest.fixture
-def logged_in(browser, gateway):
-    """A browser with an authenticated BFF session."""
-    resp = submit_login(browser, start_login(browser, gateway))
-    assert resp.status_code == 303
-    resp = browser.get(resp.headers["Location"], allow_redirects=False, timeout=10)
-    assert resp.status_code == 302, resp.text
+def logged_in(browser):
+    """A browser with an authenticated BFF session (and a Keycloak SSO session)."""
+    log_in(browser)
     return browser

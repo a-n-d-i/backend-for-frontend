@@ -3,14 +3,18 @@ Token handler: a Backend for Frontend (BFF) for browser-based apps, as in
 draft-ietf-oauth-browser-based-apps-27 section 6.1 [BBA 6.1].
 
 The SPA never sees a token. It talks to the BFF with a session cookie; the
-BFF runs the OpenID Connect login as a confidential client, keeps the tokens
-server side and adds the access token when it forwards API requests.
+BFF runs the OpenID Connect login as a confidential client and keeps the
+tokens server side. When it forwards an API request, it adds a token that
+was exchanged for exactly that API [RFC 8693], so no token is good for more
+than one service.
 
-    GET  /bff/login?return_to=/x   start the login, redirect to the authorization server
-    GET  <path of redirect_uri>    callback: exchange the code, start the session
-    GET  /bff/session              "check session": is the user logged in, and who [BBA 6.1.2.1]
-    POST /bff/logout               end the session
-    *    any other routed path     API: forwarded upstream with the access token
+    GET  /bff/login?return_to=/x     start the login, redirect to the authorization server
+    GET  <path of redirect_uri>      callback: exchange the code, start the session
+    GET  /bff/session                "check session": is the user logged in, and who [BBA 6.1.2.1]
+    POST /bff/logout                 end the session (and get the RP-initiated logout URL)
+    POST /bff/backchannel-logout     the authorization server ended the user's session
+                                     [OIDC Back-Channel Logout 1.0]
+    *    a path prefix in `apis`     API: forwarded upstream with a token for that API
 
 Citations in comments: BBA = draft-ietf-oauth-browser-based-apps-27, the
 others are RFCs, OpenID specs and OWASP cheat sheets; docs/oauth-best-practices.md
@@ -25,7 +29,7 @@ import re
 import secrets
 import time
 from typing import Any, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from apisix.runner.http.request import Request
 from apisix.runner.http.response import Response
@@ -38,8 +42,10 @@ from apisix.plugins.sessions import Session, SessionStore
 log = logging.getLogger("tokenhandler")
 
 DEFAULTS = {
-    # openid for the ID token, offline_access for a refresh token [BBA 6.1.2.2]
-    "scope": "openid email profile offline_access",
+    # openid for the ID token; the refresh token comes with the code flow
+    # [BBA 6.1.2.2]. No offline_access: offline tokens outlive the SSO session
+    # and would survive a single logout.
+    "scope": "openid profile email",
     "bff_path": "/bff/",
     # The name prefix sets no attributes, Bff._cookie does. The prefix makes
     # the browser reject the cookie unless those attributes are present
@@ -65,8 +71,14 @@ DEFAULTS = {
     # where the authorization server sends the user after RP-initiated logout;
     # default: the app's origin
     "post_logout_redirect_uri": None,
-    # plain http to the authorization server, for the local dev stack only
+    # plain http to the authorization server, for a local dev stack only
     "allow_insecure_http": False,
+    # trust anchor for TLS to the authorization server (PEM); default: system CAs
+    "ca_file": None,
+    # the APIs behind the BFF: path prefix -> {"audience", "scope"} the
+    # token for it is exchanged for. The allowlist of APIs [BBA 6.1.3.6]:
+    # other paths are refused.
+    "apis": {},
     # DEV/TEST ONLY: file for the traffic trace of requests with X-Trace-Id,
     # see plugins/trace.py. Holds tokens in clear text.
     "trace_file": None,
@@ -126,7 +138,7 @@ class Bff:
         self.request = request
         self.response = response
         self.provider = get_provider(conf["issuer"], conf["client_id"], conf["client_secret"],
-                                     conf["allow_insecure_http"])
+                                     conf["allow_insecure_http"], ca_file=conf["ca_file"])
         redirect = urlsplit(conf["redirect_uri"])
         self.callback_path = redirect.path
         self.origin = f"{redirect.scheme}://{redirect.netloc}"
@@ -142,12 +154,14 @@ class Bff:
             self.session_info()
         elif path == bff + "logout":
             self.logout()
+        elif path == bff + "backchannel-logout":
+            self.backchannel_logout()
         elif path.startswith(bff):
             _json(self.response, 404, {"error": "not_found"})
         else:
-            # Everything else that the route sends here is an API. The route
-            # config is the allowlist of upstreams: the destination never
-            # comes from the request [BBA 6.1.3.6].
+            # Everything else that the route sends here is an API. The `apis`
+            # config and the routes are the allowlist of upstreams: the
+            # destination never comes from the request [BBA 6.1.3.6].
             self.proxy()
 
     # -- endpoints ---------------------------------------------------------
@@ -229,6 +243,9 @@ class Bff:
             expires_at=now + self.conf["session_lifetime"],
             idle_timeout=self.conf["session_idle_timeout"],
             user={k: claims[k] for k in USER_CLAIMS if k in claims},
+            # the authorization server's session, for back-channel logout
+            sid=claims.get("sid"),
+            trace_id=trace.current_id(),
         )
         self._store_tokens(session, tokens)
         log.info("login of %s", claims["sub"])
@@ -268,11 +285,15 @@ class Bff:
     def proxy(self):
         if not self._csrf_ok():
             return
+        api = self._api()
+        if api is None:
+            # not in the allowlist of APIs [BBA 6.1.3.6]
+            return _json(self.response, 404, {"error": "not_found"})
         session = store.get(self._session_id())
         if session is None or not session.authenticated:
             return _json(self.response, 401, {"error": "unauthenticated"})
-        access_token = self._fresh_access_token(session)
-        if access_token is None:
+        token = self._api_token(session, api)
+        if token is None:
             store.delete(self._session_id())
             return _json(self.response, 401, {"error": "session_expired"},
                          cookie=self._cookie("", "Strict", clear=True))
@@ -287,12 +308,90 @@ class Bff:
                 del headers[name]
             elif name.lower() in ("cookie", self.conf["csrf_header"].lower()):
                 headers[name] = ""
-        headers["Authorization"] = f"Bearer {access_token}"
+        headers["Authorization"] = f"Bearer {token}"
         self.request.set_headers(headers)
-        trace.emit("forward", method=self.request.get_method(), path=self.request.get_uri(),
+        trace.emit("forward", method=self.request.get_method(), path=self.request.get_uri(), audience=api["audience"],
                    headers=[[k, v] for k, v in headers.items() if v], removed=[k for k, v in headers.items() if not v])
 
+    def backchannel_logout(self):
+        """
+        The authorization server ended the user's session there, e.g. after a
+        logout in another application: end ours too [OIDC Back-Channel Logout
+        1.0, 2.5-2.8]. Server to server: no cookie, no CSRF header; the signed
+        logout token is the authentication.
+        """
+        if not self._method("POST"):
+            return
+        t_start = time.time()
+        body = self.request.get_body() or ""
+        logout_token = parse_qs(body).get("logout_token", [None])[0]
+        try:
+            if not logout_token:
+                raise IdTokenError("no logout_token")
+            claims = self.provider.validate_logout_token(logout_token)
+        except IdTokenError as e:
+            log.warning("back-channel logout refused: %s", e)
+            return _json(self.response, 400, {"error": "invalid_request", "error_description": str(e)})
+
+        # by session id if given, else every session of the user [2.4]
+        sid, sub = claims.get("sid"), claims.get("sub")
+        ended = store.delete_where(lambda s: s.authenticated and (s.sid == sid if sid else s.user["sub"] == sub))
+        log.info("back-channel logout of sid %s: %d session(s) ended", sid, len(ended))
+        # [2.8] 200 OK, not cached
+        _json(self.response, 200, {})
+        self._trace_backchannel(ended, body, t_start, sid)
+
+    def _trace_backchannel(self, ended: list, body: str, t_start: float, sid: Optional[str]):
+        # DEV ONLY: the authorization server sends no X-Trace-Id; record the
+        # request in the trace of the login whose session it ended
+        for session in ended:
+            trace.start(self.conf["trace_file"], session.trace_id)
+            trace.emit("incoming", method="POST", url=self.origin + self.request.get_uri(),
+                       req_headers=[[k, v] for k, v in self.request.get_headers().items()], req_body=body,
+                       status=self.response.get_status_code(),
+                       resp_headers=[[k, v] for k, v in self.response.get_headers().items()],
+                       resp_body=self.response.get_body(), t_start=t_start, t_end=time.time())
+            trace.note("Back-channel logout: the logout token is valid (signature, iss, aud, iat, jti not seen "
+                       "before, the logout event, no nonce), so the BFF session with this sid is gone.",
+                       ["OIDC BCL 2.6", "OIDC BCL 2.8"], sid=sid)
+            trace.stop()
+
     # -- tokens ------------------------------------------------------------
+
+    def _api(self) -> Optional[dict]:
+        """The `apis` entry for this request: longest matching path prefix."""
+        path = self.request.get_uri()
+        prefix = max((p for p in self.conf["apis"] if path.startswith(p)), key=len, default=None)
+        return None if prefix is None else {"prefix": prefix, **self.conf["apis"][prefix]}
+
+    def _api_token(self, session: Session, api: dict) -> Optional[str]:
+        """
+        A token only for this API: the session's access token exchanged for
+        the API's audience and scope [RFC 8693; RFC 9700 2.3]. Cached until
+        shortly before it expires; None if the session is over.
+        """
+        audience = api["audience"]
+        with session.lock:
+            cached = session.service_tokens.get(audience)
+            if cached and cached[1] - self.conf["refresh_margin"] > time.time():
+                return cached[0]
+            subject = self._fresh_access_token(session)
+            if subject is None:
+                return None
+            try:
+                tokens = self.provider.exchange_token(subject, audience, api["scope"])
+            except OidcError as e:
+                if e.error is None:
+                    raise
+                # the subject token was refused: the session at the authorization server is over
+                log.warning("token exchange for %s failed for %s: %s", audience, session.user["sub"], e.error)
+                return None
+            session.service_tokens[audience] = (tokens["access_token"],
+                                                time.time() + int(tokens.get("expires_in") or 60))
+            trace.note(f"Token exchange: the session's access token became one for {audience} only "
+                       f"(scope {api['scope']}), cached until shortly before it expires.",
+                       ["RFC 8693 2.1", "RFC 9700 2.3"], audience=audience)
+            return tokens["access_token"]
 
     def _store_tokens(self, session: Session, tokens: dict):
         session.access_token = tokens["access_token"]

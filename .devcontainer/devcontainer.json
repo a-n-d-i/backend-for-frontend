@@ -8,7 +8,7 @@
   "remoteUser": "apisix",
   // the uid is set at build time in the Dockerfile
   "updateRemoteUserUID": false,
-  "forwardPorts": [9080],
+  "forwardPorts": [443, 80],
   "customizations": {
     "vscode": {
       "extensions": [

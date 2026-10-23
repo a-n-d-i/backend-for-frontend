@@ -5,12 +5,17 @@ deployment:
     config_provider: yaml   # routes come from apisix.yaml, no etcd
 
 apisix:
-  node_listen: 9080
+  # 80 only redirects to https (global rule in apisix.yaml)
+  node_listen: 80
+  ssl:
+    enable: true
+    listen:
+      - port: 443
 
 nginx_config:
   error_log_level: warn
   # Static server for the Vue SPA in spa/, reached through the `spa` route.
-  # Loopback only: the browser gets it via APISIX on 9080, same origin as
+  # Loopback only: the browser gets it via APISIX (https://app.example.test), same origin as
   # the BFF, which is what lets the BFF use SameSite=Strict cookies and
   # refuse every cross-origin request.
   http_configuration_snippet: |

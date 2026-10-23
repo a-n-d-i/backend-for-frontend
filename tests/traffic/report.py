@@ -3,7 +3,7 @@ Renders the recorded traffic (recorder.py) as static HTML:
 traffic-report/index.html and one page per test with
 
 - the test's source,
-- a sequence diagram (Browser, Gateway/BFF, Dex, API) of every message, with
+- a sequence diagram (Browser, Gateway/BFF, Keycloak, Service A/B) of every message, with
   the BFF's notes on its decisions, linking to
 - the full messages: headers, bodies, decoded JWTs and Basic credentials,
   the PKCE S256 check, and the RFC/OWASP sections each message illustrates
@@ -32,21 +32,24 @@ from urllib.parse import parse_qs, quote, quote_plus, unquote, urlsplit
 from tests.traffic.recorder import ROOT, Exchange, Forward, Note, Phase
 from tests.traffic.specs import annotate, annotate_forward, form, header, json_body, ref_url
 
+# all lanes in diagram order; a page shows the ones its test used
 LANES = [
     ("browser", "Browser"),
     ("gw", "Gateway · BFF"),
-    ("dex", "Dex · authorization server"),
-    ("api", "API · httpbin"),
+    ("keycloak", "Keycloak"),
+    ("service-a", "Service A"),
+    ("service-b", "Service B"),
 ]
 # protocol parameters and fields whose values are tracked through the flow
 PROTOCOL_KEYS = {
     "state", "nonce", "code", "code_challenge", "code_verifier", "access_token", "refresh_token", "id_token",
     "client_id", "redirect_uri", "return_to", "post_logout_redirect_uri", "logout_url", "sub", "iss",
-    "session_id",
+    "session_id", "sid", "session_state", "subject_token", "audience", "logout_token", "id_token_hint", "token",
 }
 SESSION_COOKIE_PREFIX = "__Host-"
 JWT = re.compile(r"eyJ[\w-]+\.eyJ[\w-]+\.[\w-]*")
-BASE_URL = re.compile(r"https?://(localhost|127\.0\.0\.1)(:\d+)?/?")
+# base URLs of the stack: as test values they would mark the start of every URL
+BASE_URL = re.compile(r"https?://([\w.-]*example\.test|localhost|127\.0\.0\.1|service-[ab])(:\d+)?(/realms/\w+)?/?")
 MIN_VALUE_LEN = 4
 MAX_BODY = 6000
 COLORS = 12
@@ -218,11 +221,11 @@ def _collect_values(rec, ordered) -> tuple:
             values.add(value, label, "test", first)
 
     def from_mapping(mapping, where, url=""):
-        # Dex's login UI (/dex/auth/...) carries its own request id as `state`: not the OAuth one
-        internal = urlsplit(url).path.startswith("/dex/auth/")
+        # Keycloak's login pages (/login-actions/...) carry their own parameters, not the OAuth ones
+        internal = "/login-actions/" in urlsplit(url).path
         for key, value in mapping.items():
             if key in PROTOCOL_KEYS:
-                values.add(value, f"Dex UI {key}" if internal else key, "protocol", where)
+                values.add(value, f"Keycloak UI {key}" if internal else key, "protocol", where)
 
     def from_json(obj, where):
         if isinstance(obj, dict):
@@ -305,9 +308,20 @@ def _ordered(rec) -> list:
 
 # -- HTML pieces ------------------------------------------------------------------
 
-def _lane_x(name: str) -> float:
-    i = [k for k, _ in LANES].index(name)
-    return (i + 0.5) * 100 / len(LANES)
+def _lane_x(name: str, lanes: list) -> float:
+    return (lanes.index(name) + 0.5) * 100 / len(lanes)
+
+
+def _used_lanes(ordered) -> list:
+    used = {"browser", "gw"}
+    for _, kind, e, _ in ordered:
+        if kind == "req":
+            used |= {e.src, e.dst}
+        elif kind == "fwd":
+            used.add(e.dst)
+        elif kind == "note":
+            used.add(e.lane)
+    return [k for k, _ in LANES if k in used]
 
 
 def _path(url: str) -> str:
@@ -335,8 +349,8 @@ def _annotations(items) -> str:
     return '<ul class="notes">' + "".join(f"<li>{esc(text)} {_refs(refs)}</li>" for text, refs in items) + "</ul>"
 
 
-def _arrow_row(V, anchor, n, src, dst, label, chips, dashed=False, cls="") -> str:
-    a, b = _lane_x(src), _lane_x(dst)
+def _arrow_row(V, lanes, anchor, n, src, dst, label, chips, dashed=False, cls="") -> str:
+    a, b = _lane_x(src, lanes), _lane_x(dst, lanes)
     left, width = min(a, b), abs(b - a)
     direction = "r" if b > a else "l"
     # the label may be wider than the arrow, centered on it and kept inside the diagram
@@ -364,8 +378,9 @@ def _response_label(ex: Exchange) -> str:
 
 def _diagram(V, ordered) -> str:
     # requests to another origin than the test's usual one show their host
-    hosts = [urlsplit(e.url).netloc for _, kind, e, _ in ordered if kind == "req" and e.source != "bff"]
+    hosts = [urlsplit(e.url).netloc for _, kind, e, _ in ordered if kind == "req" and e.src == "browser"]
     main_host = max(set(hosts), key=hosts.count) if hosts else ""
+    lanes = _used_lanes(ordered)
     rows = []
     for _, kind, e, anchor in ordered:
         n = anchor[1:] if anchor else ""
@@ -373,26 +388,26 @@ def _diagram(V, ordered) -> str:
             rows.append(f'<div class="row phase"><span>{esc(e.name)}</span></div>')
         elif kind == "req":
             host = urlsplit(e.url).netloc
-            label = f"{e.method} {'//' + host if e.source != 'bff' and host != main_host else ''}{_readable(e.url)}"
+            label = f"{e.method} {'//' + host if e.src == 'browser' and host != main_host else ''}{_readable(e.url)}"
             chips = V.present(*_request_texts(e))
-            rows.append(_arrow_row(V, anchor, n, e.src, e.dst, label, chips))
+            rows.append(_arrow_row(V, lanes, anchor, n, e.src, e.dst, label, chips))
         elif kind == "resp":
             chips = V.present(e.resp_body or "", *[v for _, v in e.resp_headers])
-            rows.append(_arrow_row(V, anchor, "", e.dst, e.src, _response_label(e), chips, dashed=True,
+            rows.append(_arrow_row(V, lanes, anchor, "", e.dst, e.src, _response_label(e), chips, dashed=True,
                                    cls="err" if e.error or (e.status or 0) >= 400 else ""))
         elif kind == "fwd":
             chips = V.present(*[v for _, v in e.headers])
-            rows.append(_arrow_row(V, anchor, n, "gw", "api", f"{e.method} {e.path} + Authorization: Bearer …",
-                                   chips))
+            rows.append(_arrow_row(V, lanes, anchor, n, "gw", e.dst,
+                                   f"{e.method} {e.path} + Authorization: Bearer …", chips))
         elif kind == "note":
-            x = min(max(_lane_x(e.lane) - 11, 0), 53)
+            x = min(max(_lane_x(e.lane, lanes) - 11, 0), 53)
             chips = "".join(V.chip(v) for v in V.present(*e.values.values()))
             rows.append(f'<a class="row note" href="#{anchor}"><span class="notebox" style="left:{x}%">'
                         f'<b>#{n}</b> {esc(e.text)}<span class="chips-inline">{chips}</span></span></a>')
-    lifelines = ",".join("linear-gradient(var(--lifeline),var(--lifeline))" for _ in LANES)
-    positions = ",".join(f"{_lane_x(k)}% 0" for k, _ in LANES)
-    head = "".join(f'<div class="lane">{esc(title)}</div>' for _, title in LANES)
-    return (f'<div class="seq"><div class="lanes">{head}</div>'
+    lifelines = ",".join("linear-gradient(var(--lifeline),var(--lifeline))" for _ in lanes)
+    positions = ",".join(f"{_lane_x(k, lanes)}% 0" for k in lanes)
+    head = "".join(f'<div class="lane">{esc(dict(LANES)[k])}</div>' for k in lanes)
+    return (f'<div class="seq"><div class="lanes" style="grid-template-columns:repeat({len(lanes)},1fr)">{head}</div>'
             f'<div class="rows" style="background-image:{lifelines};background-position:{positions}">'
             f'{"".join(rows)}</div></div>')
 
@@ -483,7 +498,8 @@ def _exchange_detail(V, ex: Exchange, anchor: str) -> str:
     req_form = form(ex.req_body)
     texts = [ex.req_body, ex.resp_body] + [v for _, v in ex.req_headers + ex.resp_headers]
     via = {"test": "requests (test as browser)", "browser": "Chromium (Playwright)",
-           "bff": "the BFF's back channel"}[ex.source]
+           "bff": "the BFF's back channel", "keycloak": "Keycloak's back channel, recorded by the BFF",
+           "service-a": "Service A's back channel", "service-b": "Service B's back channel"}[ex.source]
     timing = f"{(ex.t_end - ex.t_start) * 1000:.0f} ms"
     return (f'<details class="ex" id="{anchor}"><summary><b>#{anchor[1:]}</b> '
             f'<span class="who">{esc(lanes[ex.src])} → {esc(lanes[ex.dst])}</span> '
@@ -509,11 +525,11 @@ def _note_detail(V, note: Note, anchor: str) -> str:
 def _forward_detail(V, fwd: Forward, anchor: str) -> str:
     removed = ", ".join(f"<code>{esc(h)}</code>" for h in fwd.removed) or "none"
     return (f'<details class="ex" id="{anchor}"><summary><b>#{anchor[1:]}</b> '
-            f'<span class="who">Gateway · BFF → API · httpbin</span> {esc(fwd.method)} {esc(fwd.path)} '
-            f'(forwarded)</summary>{_annotations(annotate_forward(fwd))}'
+            f'<span class="who">Gateway · BFF → {esc(dict(LANES)[fwd.dst])}</span> {esc(fwd.method)} '
+            f'{esc(fwd.path)} (forwarded)</summary>{_annotations(annotate_forward(fwd))}'
             '<p class="meta">Headers as the BFF hands the request back to APISIX. The route then strips the '
-            '<code>/api</code> prefix (proxy-rewrite); the response is the one the browser gets, minus the '
-            'redacted token.</p>'
+            '<code>/api/…</code> prefix (proxy-rewrite); the service\'s answer goes back to the browser '
+            'unchanged.</p>'
             f'<h4>Forwarded request</h4>{_headers_table(V, fwd.headers)}<p>Removed: {removed}</p>'
             f'{_extras(V, [v for _, v in fwd.headers], {}, [])}</details>')
 
@@ -589,7 +605,7 @@ def render(out_dir: Path, recordings) -> Path:
         for module, rows in groups.items())
     body = (f'<header><h1>Traffic report</h1>'
             f'<p>The HTTP traffic of each test as a sequence diagram: browser (Chromium or <code>requests</code> '
-            f'acting as one), gateway with the BFF, Dex, and the API behind the BFF. Every message links to its '
+            f'acting as one), gateway with the BFF, Keycloak, and the two services behind the BFF. Every message links to its '
             f'full headers and body and to the RFC / OWASP sections it is an example of; the best practices '
             f'themselves are listed in <a href="../docs/oauth-best-practices.md">docs/oauth-best-practices.md</a>.'
             f'</p><p class="warn">Contains the dev stack\'s real codes, tokens and client secret. '
@@ -650,7 +666,7 @@ mark.v.focus, .chip.focus { outline: 2px solid var(--fg); }
 
 /* sequence diagram */
 .seq { background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
-.lanes { display: grid; grid-template-columns: repeat(4, 1fr); position: sticky; top: 0; z-index: 2;
+.lanes { display: grid; position: sticky; top: 0; z-index: 2;
   background: var(--card); border-bottom: 1px solid var(--border); border-radius: 8px 8px 0 0; }
 .lane { text-align: center; font-weight: 600; font-size: 0.85rem; padding: 0.6rem 0.25rem; }
 .rows { position: relative; background-repeat: no-repeat; background-size: 1px 100%; padding: 0.5rem 0; }

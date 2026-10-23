@@ -35,14 +35,22 @@ class Session:
 
     # authenticated: claims shown to the SPA, tokens that never leave the BFF
     user: Optional[dict] = None
+    # session id at the authorization server (ID token `sid`), the key of
+    # back-channel logout [OIDC Back-Channel Logout 2.4]
+    sid: Optional[str] = None
     id_token: Optional[str] = None
     access_token: Optional[str] = None
     access_token_expires_at: Optional[float] = None
     refresh_token: Optional[str] = None
+    # tokens exchanged for the APIs: audience -> (token, expires_at)
+    service_tokens: dict = field(default_factory=dict)
+    # DEV ONLY: trace id of the login, so a later back-channel logout shows up in its trace
+    trace_id: Optional[str] = None
 
-    # serializes token refreshes of one session: with refresh token rotation a
-    # second, parallel refresh would use an already spent refresh token
-    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    # serializes token refreshes and exchanges of one session: with refresh
+    # token rotation a second, parallel refresh would use an already spent
+    # refresh token. Reentrant: an exchange may refresh first.
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     @property
     def authenticated(self) -> bool:
@@ -96,6 +104,13 @@ class SessionStore:
             return None
         with self._lock:
             return self._sessions.pop(_key(session_id), None)
+
+    def delete_where(self, predicate) -> list:
+        """Deletes and returns all live sessions for which `predicate(session)` holds."""
+        now = self._clock()
+        with self._lock:
+            keys = [k for k, s in self._sessions.items() if not self._expired(s, now) and predicate(s)]
+            return [self._sessions.pop(k) for k in keys]
 
     def __len__(self):
         return len(self._sessions)

@@ -8,6 +8,7 @@ endpoint with its client secret, and only it ever sees tokens.
 import base64
 import hmac
 import json
+import ssl
 import threading
 import time
 import urllib.error
@@ -24,6 +25,12 @@ from apisix.plugins import trace
 SIGNING_ALGORITHMS = ("RS256", "PS256", "ES256")
 # tolerated clock skew for exp/iat
 LEEWAY = 60
+
+TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
+ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+BACKCHANNEL_LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout"
+# how long a logout token's jti is remembered against replay
+LOGOUT_TOKEN_MAX_AGE = 300
 
 
 class OidcError(Exception):
@@ -42,12 +49,17 @@ class IdTokenError(Exception):
 class Provider:
 
     def __init__(self, issuer: str, client_id: str, client_secret: str,
-                 allow_insecure_http: bool = False, timeout: float = 5):
+                 allow_insecure_http: bool = False, timeout: float = 5, ca_file: Optional[str] = None):
         self.issuer = issuer
         self.client_id = client_id
         self._client_secret = client_secret
         self._allow_insecure_http = allow_insecure_http
         self._timeout = timeout
+        # TLS to the authorization server is always verified; `ca_file` pins
+        # the trust anchor (the internal CA) instead of all public CAs
+        self._ssl = ssl.create_default_context(cafile=ca_file)
+        self._opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=self._ssl))
+        self._seen_logout_jtis = {}
         self._metadata = None
         self._jwks = None
         # reentrant: `jwks` reads `metadata` while holding it
@@ -96,7 +108,7 @@ class Provider:
             if self._jwks is None:
                 # keys are cached; an unknown `kid` refetches the set, which handles key rotation
                 self._jwks = _JwksClient(self.metadata["jwks_uri"], cache_jwk_set=True,
-                                         lifespan=300, timeout=self._timeout)
+                                         lifespan=300, timeout=self._timeout, ssl_context=self._ssl)
             return self._jwks
 
     # -- front channel -----------------------------------------------------
@@ -133,6 +145,24 @@ class Provider:
     def refresh(self, refresh_token: str) -> dict:
         # [BBA 6.1.2.2] refresh with client authentication, tokens stay in the BFF
         return self._token_request({"grant_type": "refresh_token", "refresh_token": refresh_token})
+
+    def exchange_token(self, subject_token: str, audience: str, scope: str) -> dict:
+        """
+        OAuth 2.0 Token Exchange [RFC 8693 2.1]: trades the session's access
+        token for one that is only meant for `audience`, with only `scope`
+        [RFC 9700 2.3: audience-restricted, least privilege].
+        """
+        tokens = self._token_request({
+            "grant_type": TOKEN_EXCHANGE,
+            "subject_token": subject_token,
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+            "requested_token_type": ACCESS_TOKEN_TYPE,
+            "audience": audience,
+            "scope": scope,
+        })
+        if tokens.get("issued_token_type") != ACCESS_TOKEN_TYPE:
+            raise OidcError(f"token exchange issued {tokens.get('issued_token_type')!r}, not an access token")
+        return tokens
 
     def revoke(self, token: str, token_type_hint: str = "refresh_token") -> bool:
         """Revokes `token` if the server has a revocation endpoint [RFC 7009]. Best effort."""
@@ -179,7 +209,9 @@ class Provider:
         t_start = time.time()
         status, headers, body, ok, error = None, [], b"", False, None
         try:
-            with _NO_REDIRECTS.open(req, timeout=self._timeout) as resp:
+            if trace.active():
+                req.add_header(trace.TRACE_HEADER, trace.current_id())
+            with self._opener.open(req, timeout=self._timeout) as resp:
                 status, headers, body, ok = resp.status, resp.getheaders(), resp.read(), True
         except urllib.error.HTTPError as e:
             status, headers, body = e.code, e.headers.items(), e.read()
@@ -240,6 +272,44 @@ class Provider:
             raise IdTokenError("refreshed ID token is about another user")
         return claims
 
+    def validate_logout_token(self, logout_token: str) -> dict:
+        """
+        Validates a back-channel logout token as in [OIDC Back-Channel Logout
+        1.0, 2.6] and returns its claims. Raises IdTokenError.
+        """
+        allowed = [alg for alg in SIGNING_ALGORITHMS
+                   if alg in self.metadata.get("id_token_signing_alg_values_supported", ["RS256"])]
+        try:
+            # explicitly typed if typed at all, so no other JWT passes as logout token [2.4]
+            typ = jwt.get_unverified_header(logout_token).get("typ")
+            if typ is not None and typ.lower() not in ("logout+jwt", "application/logout+jwt", "jwt"):
+                raise IdTokenError(f"logout token has typ {typ!r}")
+            key = self.jwks.get_signing_key_from_jwt(logout_token)
+            # signature, iss, aud = this client, iat (and exp if present)
+            claims = jwt.decode(logout_token, key.key, algorithms=allowed, issuer=self.issuer,
+                                audience=self.client_id, leeway=LEEWAY,
+                                options={"require": ["iss", "aud", "iat", "jti"]})
+        except (jwt.PyJWTError, OidcError) as e:
+            raise IdTokenError(f"invalid logout token: {e}") from None
+        # (4) sub or sid; (5) the back-channel logout event; (6) no nonce, so no ID token passes as logout token
+        if not claims.get("sid") and not claims.get("sub"):
+            raise IdTokenError("logout token has neither sid nor sub")
+        events = claims.get("events")
+        if not isinstance(events, dict) or not isinstance(events.get(BACKCHANNEL_LOGOUT_EVENT), dict):
+            raise IdTokenError("logout token lacks the back-channel logout event")
+        if "nonce" in claims:
+            raise IdTokenError("logout token must not contain a nonce")
+        # (7) not too old, and no replay of a logout token already seen
+        now = time.time()
+        if claims["iat"] < now - LOGOUT_TOKEN_MAX_AGE:
+            raise IdTokenError("logout token is too old")
+        with self._lock:
+            self._seen_logout_jtis = {j: t for j, t in self._seen_logout_jtis.items() if t > now}
+            if claims["jti"] in self._seen_logout_jtis:
+                raise IdTokenError("logout token replayed")
+            self._seen_logout_jtis[claims["jti"]] = now + LOGOUT_TOKEN_MAX_AGE + LEEWAY
+        return claims
+
 
 def _equal(a: Optional[str], b: str) -> bool:
     return a is not None and hmac.compare_digest(a.encode(), b.encode())
@@ -251,8 +321,6 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
 
-
-_NO_REDIRECTS = urllib.request.build_opener(_NoRedirect)
 
 
 class _JwksClient(jwt.PyJWKClient):
@@ -270,9 +338,10 @@ _providers = {}
 _providers_lock = threading.Lock()
 
 
-def get_provider(issuer: str, client_id: str, client_secret: str, allow_insecure_http: bool = False) -> Provider:
-    key = (issuer, client_id, client_secret, allow_insecure_http)
+def get_provider(issuer: str, client_id: str, client_secret: str, allow_insecure_http: bool = False,
+                 ca_file: Optional[str] = None) -> Provider:
+    key = (issuer, client_id, client_secret, allow_insecure_http, ca_file)
     with _providers_lock:
         if key not in _providers:
-            _providers[key] = Provider(issuer, client_id, client_secret, allow_insecure_http)
+            _providers[key] = Provider(issuer, client_id, client_secret, allow_insecure_http, ca_file=ca_file)
         return _providers[key]

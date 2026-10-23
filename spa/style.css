@@ -56,7 +56,9 @@ dl {
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
 
-.actions { display: flex; gap: 0.5rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+a { color: var(--accent); }
 
 button {
   font: inherit;

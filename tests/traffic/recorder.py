@@ -6,9 +6,11 @@ Two sides are joined per test:
 - what the test sees: every hop of `requests` (patched at the transport
   adapter, so each redirect is its own exchange) and every request of the
   Playwright browser context (static assets left out);
-- what the BFF does for those requests (back-channel calls, the forwarded API
-  request, its decisions), which it writes to BFF_TRACE when the request
-  carries X-Trace-Id (plugins/trace.py; `trace_file` in conf/apisix.yaml).
+- what the BFF and the services do for those requests (back-channel calls,
+  the forwarded API request, their decisions), which they write to BFF_TRACE
+  when the request carries X-Trace-Id (plugins/trace.py; `trace_file` in
+  conf/apisix.yaml, TRACE_FILE for the services). The BFF also records
+  Keycloak's back-channel logout requests under the trace of the login.
 
 Disable with `-p no:tests.traffic.recorder`.
 """
@@ -61,12 +63,13 @@ class Note:
 
 @dataclass
 class Forward:
-    """The request the BFF lets through to the API, after adding the token."""
+    """The request the BFF lets through to an API, after adding the token."""
     t: float
     method: str
     path: str
     headers: list
     removed: list
+    dst: str = "service-a"
 
 
 @dataclass
@@ -92,9 +95,15 @@ _recordings: list = []
 _current: Optional[Recording] = None
 
 
+# lanes of the sequence diagrams, by host (public name or the one inside Docker)
+HOST_LANES = {"auth.example.test": "keycloak", "keycloak": "keycloak",
+              "service-a": "service-a", "service-b": "service-b"}
+# lane of each component writing to the trace
+SOURCE_LANES = {"bff": "gw", "service-a": "service-a", "service-b": "service-b"}
+
+
 def lane(url: str) -> str:
-    path = urlsplit(url).path
-    return "dex" if path.startswith("/dex/") else "gw"
+    return HOST_LANES.get(urlsplit(url).hostname or "", "gw")
 
 
 def _text(body) -> Optional[str]:
@@ -262,16 +271,21 @@ def _merge_bff_trace():
         rec = by_id.get(ev.get("trace"))
         if rec is None:
             continue
-        if ev["type"] == "exchange":
+        src = SOURCE_LANES.get(ev.get("source"), "gw")
+        if ev["type"] in ("exchange", "incoming"):
+            # incoming: a request the BFF received without a trace id (Keycloak's back-channel logout)
+            source, src, dst = ("keycloak", "keycloak", "gw") if ev["type"] == "incoming" else \
+                (ev.get("source", "bff"), src, lane(ev["url"]))
             rec.events.append(Exchange(
-                source="bff", src="gw", dst=lane(ev["url"]), method=ev["method"], url=ev["url"],
-                req_headers=[tuple(h) for h in ev["req_headers"]], req_body=ev["req_body"], status=ev["status"],
-                reason="", resp_headers=[tuple(h) for h in ev["resp_headers"]], resp_body=ev["resp_body"],
-                t_start=ev["t_start"], t_end=ev["t_end"], error=ev.get("error")))
+                source=source, src=src, dst=dst, method=ev["method"], url=ev["url"],
+                req_headers=_without_trace_header(tuple(h) for h in ev["req_headers"]), req_body=ev["req_body"],
+                status=ev["status"], reason="", resp_headers=[tuple(h) for h in ev["resp_headers"]],
+                resp_body=ev["resp_body"], t_start=ev["t_start"], t_end=ev["t_end"], error=ev.get("error")))
         elif ev["type"] == "note":
-            rec.events.append(Note(ev["t"], ev["text"], ev["refs"], ev["values"]))
+            rec.events.append(Note(ev["t"], ev["text"], ev["refs"], ev["values"], src))
         elif ev["type"] == "forward":
-            rec.events.append(Forward(ev["t"], ev["method"], ev["path"], ev["headers"], ev["removed"]))
+            rec.events.append(Forward(ev["t"], ev["method"], ev["path"], ev["headers"], ev["removed"],
+                                      HOST_LANES.get(ev.get("audience", ""), "service-a")))
 
 
 def pytest_sessionfinish(session):

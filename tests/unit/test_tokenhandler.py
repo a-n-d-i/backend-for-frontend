@@ -23,6 +23,8 @@ CONF = {
     "client_id": "bff",
     "client_secret": "secret",
     "redirect_uri": "https://app.example/bff/callback",
+    "apis": {"/api/a/": {"audience": "service-a", "scope": "api-a"},
+             "/api/b/": {"audience": "service-b", "scope": "api-b"}},
 }
 COOKIE = "__Host-Http-bff-session"
 CSRF = {"x-bff-csrf": "1"}
@@ -44,6 +46,10 @@ class FakeProvider:
         self.validated = []
         self.refreshed = []
         self.revoked = []
+        self.exchanges = []
+        self.exchange_error = None
+        self.logout_claims = {"iss": CONF["issuer"], "sid": "idp-sid-1", "sub": "user-1"}
+        self.logout_error = None
 
     def authorization_url(self, redirect_uri, scope, state, nonce, code_challenge):
         self.authorization_requests.append(dict(redirect_uri=redirect_uri, scope=scope, state=state,
@@ -68,6 +74,19 @@ class FakeProvider:
             raise self.id_token_error
         return dict(CLAIMS, nonce=nonce)
 
+    def exchange_token(self, subject_token, audience, scope):
+        self.exchanges.append(dict(subject_token=subject_token, audience=audience, scope=scope))
+        if self.exchange_error:
+            raise self.exchange_error
+        return {"access_token": f"{audience}-token-{len(self.exchanges)}", "token_type": "Bearer",
+                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token", "expires_in": 300}
+
+    def validate_logout_token(self, logout_token):
+        self.logout_token = logout_token
+        if self.logout_error:
+            raise self.logout_error
+        return dict(self.logout_claims)
+
     def revoke(self, token, token_type_hint="refresh_token"):
         self.revoked.append(token)
         return True
@@ -79,7 +98,7 @@ class FakeProvider:
 @pytest.fixture(autouse=True)
 def provider(monkeypatch):
     fake = FakeProvider()
-    monkeypatch.setattr(tokenhandler, "get_provider", lambda *args: fake)
+    monkeypatch.setattr(tokenhandler, "get_provider", lambda *args, **kwargs: fake)
     return fake
 
 
@@ -90,7 +109,7 @@ def store(monkeypatch):
     return fresh
 
 
-def call(method, uri, headers=None, args=None, conf=None):
+def call(method, uri, headers=None, args=None, conf=None, body=None):
     """Runs the plugin on a request; returns (request, response)."""
     # an RPC request without payload yields an empty Request to fill in
     with socket.socket() as sock:
@@ -99,6 +118,8 @@ def call(method, uri, headers=None, args=None, conf=None):
     request.set_uri(uri)
     request.set_headers({"host": "app.example", **(headers or {})})
     request.set_args(args or {})
+    if body is not None:
+        request.set_body(body)
     response = Response()
     plugin = TokenHandler()
     plugin.filter(plugin.config(json.dumps({**CONF, **(conf or {})})), request, response)
@@ -145,7 +166,9 @@ def test_config_applies_defaults():
 
     assert conf["client_id"] == "bff"
     assert conf["cookie_name"] == COOKIE
-    assert "offline_access" in conf["scope"]
+    # no offline_access: offline tokens outlive the SSO session (and a single logout)
+    assert conf["scope"] == "openid profile email"
+    assert conf["apis"] == CONF["apis"]
 
 
 @pytest.mark.parametrize("missing", ["issuer", "client_id", "client_secret", "redirect_uri"])
@@ -380,7 +403,7 @@ def test_session_info_without_session():
     {**CSRF, "origin": "https://evil.example"},
     {**CSRF, "origin": "null"},
 ])
-@pytest.mark.parametrize("method, path", [("GET", "/bff/session"), ("POST", "/bff/logout"), ("GET", "/api/x")])
+@pytest.mark.parametrize("method, path", [("GET", "/bff/session"), ("POST", "/bff/logout"), ("GET", "/api/a/x")])
 def test_csrf_check(store, headers, method, path):
     session_id, _ = logged_in(store)
 
@@ -402,22 +425,71 @@ def test_csrf_check_accepts_same_origin_browser_request(store):
 
 # -- API proxy -------------------------------------------------------------------
 
-def test_api_request_gets_access_token(store):
+def test_api_request_gets_a_token_exchanged_for_that_api(provider, store):
     session_id, _ = logged_in(store)
 
-    request, response = call("GET", "/api/items",
+    request, response = call("GET", "/api/a/items",
                              headers=with_cookie(session_id, {**CSRF, "authorization": "Bearer from-browser"}))
 
     assert not response.changed()
+    assert provider.exchanges == [{"subject_token": "at-1", "audience": "service-a", "scope": "api-a"}]
     headers = request.get_headers()
-    assert headers["Authorization"] == "Bearer at-1"
+    assert headers["Authorization"] == "Bearer service-a-token-1"
     # removed upstream (the gateway drops empty headers)
     assert headers["cookie"] == "" and headers["x-bff-csrf"] == ""
     assert "authorization" not in headers
 
 
+def test_each_api_gets_its_own_token(provider, store):
+    session_id, _ = logged_in(store)
+
+    a, _ = call("GET", "/api/a/x", headers=with_cookie(session_id, CSRF))
+    b, _ = call("GET", "/api/b/x", headers=with_cookie(session_id, CSRF))
+
+    assert [e["audience"] for e in provider.exchanges] == ["service-a", "service-b"]
+    assert a.get_header("Authorization") == "Bearer service-a-token-1"
+    assert b.get_header("Authorization") == "Bearer service-b-token-2"
+
+
+def test_exchanged_token_is_cached_until_it_nearly_expires(provider, store):
+    session_id, session = logged_in(store)
+
+    call("GET", "/api/a/x", headers=with_cookie(session_id, CSRF))
+    second, _ = call("GET", "/api/a/y", headers=with_cookie(session_id, CSRF))
+
+    assert len(provider.exchanges) == 1
+    assert second.get_header("Authorization") == "Bearer service-a-token-1"
+
+    # about to expire: exchanged again
+    token, _ = session.service_tokens["service-a"]
+    session.service_tokens["service-a"] = (token, time.time() + 10)
+    third, _ = call("GET", "/api/a/z", headers=with_cookie(session_id, CSRF))
+
+    assert len(provider.exchanges) == 2
+    assert third.get_header("Authorization") == "Bearer service-a-token-2"
+
+
+def test_api_outside_the_allowlist(provider, store):
+    session_id, _ = logged_in(store)
+
+    request, response = call("GET", "/api/c/x", headers=with_cookie(session_id, CSRF))
+
+    assert response.get_status_code() == 404
+    assert provider.exchanges == []
+    assert request.get_header("Authorization") is None
+
+
+def test_longest_api_prefix_wins(provider, store):
+    session_id, _ = logged_in(store)
+    apis = {**CONF["apis"], "/api/a/admin/": {"audience": "admin", "scope": "admin"}}
+
+    call("GET", "/api/a/admin/x", headers=with_cookie(session_id, CSRF), conf={"apis": apis})
+
+    assert provider.exchanges[0]["audience"] == "admin"
+
+
 def test_api_request_without_session():
-    _, response = call("GET", "/api/items", headers=CSRF)
+    _, response = call("GET", "/api/a/items", headers=CSRF)
 
     assert response.get_status_code() == 401
 
@@ -425,21 +497,44 @@ def test_api_request_without_session():
 def test_api_request_with_pending_login_only(provider):
     pending_id, _ = start_login(provider)
 
-    _, response = call("GET", "/api/items", headers=with_cookie(pending_id, CSRF))
+    _, response = call("GET", "/api/a/items", headers=with_cookie(pending_id, CSRF))
 
     assert response.get_status_code() == 401
 
 
-def test_expiring_access_token_is_refreshed(provider, store):
+def test_refused_exchange_ends_session(provider, store):
+    # e.g. the session at the authorization server is over
+    session_id, _ = logged_in(store)
+    provider.exchange_error = OidcError("400", "invalid_request")
+
+    _, response = call("GET", "/api/a/items", headers=with_cookie(session_id, CSRF))
+
+    assert response.get_status_code() == 401
+    assert body(response) == {"error": "session_expired"}
+    assert store.get(session_id) is None
+
+
+def test_unreachable_authorization_server_during_exchange_is_502(provider, store):
+    session_id, _ = logged_in(store)
+    provider.exchange_error = OidcError("connection refused")
+
+    _, response = call("GET", "/api/a/items", headers=with_cookie(session_id, CSRF))
+
+    assert response.get_status_code() == 502
+    assert store.get(session_id) is not None
+
+
+def test_expiring_access_token_is_refreshed_before_the_exchange(provider, store):
     session_id, session = logged_in(store, access_token_expires_at=time.time() + 5)
     provider.token_response = {"access_token": "at-2", "token_type": "Bearer", "expires_in": 600,
                                "refresh_token": "rt-2", "id_token": "id-2"}
 
-    request, _ = call("GET", "/api/items", headers=with_cookie(session_id, CSRF))
+    call("GET", "/api/a/items", headers=with_cookie(session_id, CSRF))
 
     assert provider.refreshed == ["rt-1"]
     assert provider.validated == [{"id_token": "id-2", "nonce": None, "expected_sub": "user-1"}]
-    assert request.get_header("Authorization") == "Bearer at-2"
+    # the fresh token is what gets exchanged
+    assert provider.exchanges[0]["subject_token"] == "at-2"
     # rotated refresh token replaces the spent one
     assert session.refresh_token == "rt-2" and session.id_token == "id-2"
 
@@ -448,7 +543,7 @@ def test_refresh_keeps_refresh_token_without_rotation(provider, store):
     session_id, session = logged_in(store, access_token_expires_at=time.time() - 1)
     provider.token_response = {"access_token": "at-2", "token_type": "Bearer", "expires_in": 600}
 
-    call("GET", "/api/items", headers=with_cookie(session_id, CSRF))
+    call("GET", "/api/a/items", headers=with_cookie(session_id, CSRF))
 
     assert session.refresh_token == "rt-1"
 
@@ -456,7 +551,7 @@ def test_refresh_keeps_refresh_token_without_rotation(provider, store):
 def test_valid_access_token_is_not_refreshed(provider, store):
     session_id, _ = logged_in(store)
 
-    call("GET", "/api/items", headers=with_cookie(session_id, CSRF))
+    call("GET", "/api/a/items", headers=with_cookie(session_id, CSRF))
 
     assert provider.refreshed == []
 
@@ -471,12 +566,70 @@ def test_failed_refresh_ends_session(provider, store, problem):
     else:
         store.get(session_id).refresh_token = None
 
-    _, response = call("GET", "/api/items", headers=with_cookie(session_id, CSRF))
+    _, response = call("GET", "/api/a/items", headers=with_cookie(session_id, CSRF))
 
     assert response.get_status_code() == 401
     assert body(response) == {"error": "session_expired"}
     assert "Max-Age=0" in response.get_header("Set-Cookie")
     assert store.get(session_id) is None
+    assert provider.exchanges == []
+
+
+# -- back-channel logout -------------------------------------------------------------
+
+def test_back_channel_logout_ends_the_sessions_of_that_sid(provider, store):
+    mine, _ = logged_in(store, sid="idp-sid-1")
+    also_mine, _ = logged_in(store, sid="idp-sid-1")
+    other, _ = logged_in(store, sid="idp-sid-2")
+
+    # server to server: no cookie, no CSRF header
+    _, response = call("POST", "/bff/backchannel-logout", body="logout_token=the.logout.token",
+                       headers={"content-type": "application/x-www-form-urlencoded"})
+
+    assert response.get_status_code() == 200
+    assert response.get_header("Cache-Control") == "no-store"
+    assert provider.logout_token == "the.logout.token"
+    assert store.get(mine) is None and store.get(also_mine) is None
+    assert store.get(other) is not None
+
+
+def test_back_channel_logout_without_sid_ends_all_sessions_of_the_user(provider, store):
+    provider.logout_claims = {"iss": CONF["issuer"], "sub": "user-1"}
+    first, _ = logged_in(store, sid="s1")
+    second, _ = logged_in(store, sid="s2")
+    someone_else, _ = logged_in(store, sid="s3", user={"sub": "user-2"})
+
+    call("POST", "/bff/backchannel-logout", body="logout_token=t")
+
+    assert store.get(first) is None and store.get(second) is None
+    assert store.get(someone_else) is not None
+
+
+@pytest.mark.parametrize("body_", ["", "other=1", "logout_token=forged"])
+def test_back_channel_logout_refuses_invalid_requests(provider, store, body_):
+    provider.logout_error = IdTokenError("invalid logout token: Signature verification failed")
+    session_id, _ = logged_in(store, sid="idp-sid-1")
+
+    _, response = call("POST", "/bff/backchannel-logout", body=body_)
+
+    assert response.get_status_code() == 400
+    assert body(response)["error"] == "invalid_request"
+    assert store.get(session_id) is not None
+
+
+def test_back_channel_logout_needs_post(provider):
+    _, response = call("GET", "/bff/backchannel-logout")
+
+    assert response.get_status_code() == 405
+
+
+def test_callback_keeps_the_idp_session_id(provider, store):
+    provider.validate_id_token = lambda id_token, nonce, expected_sub=None: dict(CLAIMS, sid="idp-sid-9")
+    pending_id, state = start_login(provider)
+
+    _, response = call("GET", "/bff/callback", headers=with_cookie(pending_id), args={"code": "c", "state": state})
+
+    assert store.get(cookie_of(response)).sid == "idp-sid-9"
 
 
 # -- logout ------------------------------------------------------------------------
@@ -551,6 +704,7 @@ def events(path):
 
 def test_login_is_traced_with_file_and_header(tmp_path):
     path = tmp_path / "trace.jsonl"
+    path.touch()  # the test run creates it; components only append
 
     call("GET", "/bff/login", headers={"x-trace-id": "T0001"}, conf={"trace_file": str(path)})
 
@@ -567,6 +721,7 @@ def test_login_is_traced_with_file_and_header(tmp_path):
 ])
 def test_nothing_is_traced_otherwise(tmp_path, headers, conf):
     path = tmp_path / "trace.jsonl"
+    path.touch()
 
     call("GET", "/bff/login", headers=headers, conf={"trace_file": str(path)} if conf else {})
 
@@ -575,12 +730,36 @@ def test_nothing_is_traced_otherwise(tmp_path, headers, conf):
 
 def test_forwarded_api_request_is_traced(tmp_path, store):
     path = tmp_path / "trace.jsonl"
+    path.touch()
     session_id, _ = logged_in(store)
 
-    call("GET", "/api/items", headers=with_cookie(session_id, {**CSRF, "x-trace-id": "T2"}),
+    call("GET", "/api/a/items", headers=with_cookie(session_id, {**CSRF, "x-trace-id": "T2"}),
          conf={"trace_file": str(path)})
 
-    (fwd,) = events(path)
-    assert fwd["type"] == "forward"
-    assert ["Authorization", "Bearer at-1"] in fwd["headers"]
+    exchange_note, fwd = events(path)
+    assert exchange_note["type"] == "note" and exchange_note["values"] == {"audience": "service-a"}
+    assert fwd["type"] == "forward" and fwd["audience"] == "service-a"
+    assert ["Authorization", "Bearer service-a-token-1"] in fwd["headers"]
     assert set(fwd["removed"]) == {"cookie", "x-bff-csrf"}
+
+
+def test_trace_file_is_never_created(tmp_path):
+    path = tmp_path / "trace.jsonl"
+
+    call("GET", "/bff/login", headers={"x-trace-id": "T1"}, conf={"trace_file": str(path)})
+
+    assert not path.exists()
+
+
+def test_back_channel_logout_is_traced_under_the_login_trace(tmp_path, provider, store):
+    path = tmp_path / "trace.jsonl"
+    path.touch()
+    logged_in(store, sid="idp-sid-1", trace_id="T7")
+
+    # the authorization server sends no trace id
+    call("POST", "/bff/backchannel-logout", body="logout_token=t", conf={"trace_file": str(path)})
+
+    incoming, note = events(path)
+    assert incoming["trace"] == "T7" and incoming["type"] == "incoming"
+    assert incoming["req_body"] == "logout_token=t" and incoming["status"] == 200
+    assert note["values"] == {"sid": "idp-sid-1"}
