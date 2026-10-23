@@ -262,7 +262,7 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 
 ## Known limitations of the dev setup
 
-- **Dev PKI.** The certificates come from a local CA that you trust once. It is name-constrained to `example.test` and its private key was discarded, so it can't be abused for other domains. The server key is in the repository on purpose, since it only covers a domain that exists on your machine.
+- **Dev PKI.** The certificates come from a local CA that you trust once. It is made per machine (`conf/pki/`, gitignored, never published), name-constrained to `example.test`, and its private key is discarded at creation, so a leak couldn't be abused for other domains. The server key stays on the machine; whoever had it could impersonate `*.example.test` to everyone trusting that CA (see the warning in the README).
 - **Plain http inside the Docker network.** See section 2.
 - **Secrets in config files.** Fine for the local stack. Production should load them from a secret store.
 - **In-memory sessions.** See section 6.

@@ -57,12 +57,11 @@ RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt \
     && playwright install --with-deps chromium \
     && chown -R apisix:apisix "${VIRTUAL_ENV}" "${PLAYWRIGHT_BROWSERS_PATH}"
 
-# Trust the dev CA of *.example.test (scripts/dev_pki.py; name-constrained to
-# example.test, its key discarded). System-wide for curl and Python; requests
-# uses its own bundle unless told otherwise. Rebuild after rotating the PKI.
-COPY conf/pki/ca.pem /usr/local/share/ca-certificates/example-test-dev-ca.crt
-RUN update-ca-certificates
+# The dev PKI (conf/pki, per machine, gitignored) is not baked into the image:
+# gateway-entrypoint.sh loads the TLS certificate and trusts the dev CA at
+# start. requests uses its own CA bundle unless pointed at the system one.
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+COPY --chmod=755 .devcontainer/gateway-entrypoint.sh /usr/local/bin/gateway-entrypoint.sh
 
 # APISIX reads its config straight from the workspace; apisix.yaml (routes) is
 # hot reloaded, config.yaml needs a container restart.
@@ -81,8 +80,5 @@ RUN mkdir -p "${CLAUDE_CONFIG_DIR}" \
     && curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
 
-# Chromium (Playwright tests) reads trust anchors from the user's NSS database
-RUN mkdir -p /home/apisix/.pki/nssdb \
-    && certutil -d sql:/home/apisix/.pki/nssdb -N --empty-password \
-    && certutil -d sql:/home/apisix/.pki/nssdb -A -t "C,," -n "example.test dev CA" \
-        -i /usr/local/share/ca-certificates/example-test-dev-ca.crt
+ENTRYPOINT ["/usr/local/bin/gateway-entrypoint.sh"]
+CMD ["docker-start"]

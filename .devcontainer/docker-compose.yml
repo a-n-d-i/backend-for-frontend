@@ -5,7 +5,8 @@ name: apisix-tokenhandler
 # auth.example.test are network aliases of the gateway, so they resolve to it
 # inside the stack as well. On the host, add to /etc/hosts:
 #   127.0.0.1 app.example.test auth.example.test
-# TLS uses the dev certificate from scripts/dev_pki.py (conf/pki).
+# TLS uses the dev PKI in conf/pki, made per machine by the `pki` service
+# (scripts/dev_pki.py) before anything else starts; it is gitignored.
 
 x-service: &service
   build:
@@ -18,7 +19,10 @@ x-service: &service
     # the code, and traffic-report/ for the dev trace
     - ..:/workspace
   depends_on:
-    - keycloak
+    pki:
+      condition: service_completed_successfully
+    keycloak:
+      condition: service_started
 
 x-service-env: &service-env
   ISSUER: https://auth.example.test/realms/demo
@@ -29,6 +33,18 @@ x-service-env: &service-env
   PYTHONUNBUFFERED: "1"
 
 services:
+  # One-shot: creates conf/pki (dev CA + certificate for *.example.test) if it
+  # is missing or about to expire; everything below waits for it.
+  pki:
+    build:
+      context: ..
+      dockerfile: .devcontainer/services.Dockerfile
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
+    working_dir: /workspace
+    command: ["python", "scripts/dev_pki.py"]
+    volumes:
+      - ..:/workspace
+
   # The gateway (APISIX + tokenhandler BFF) and the dev container in one.
   apisix:
     build:
@@ -51,14 +67,22 @@ services:
           - app.example.test
           - auth.example.test
     depends_on:
-      - keycloak
-      - service-a
-      - service-b
+      pki:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_started
+      service-a:
+        condition: service_started
+      service-b:
+        condition: service_started
 
   # Authorization server; realm, clients and user in conf/keycloak/demo-realm.json.
   # Behind the gateway: TLS ends there, Keycloak knows its public URL.
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.0
+    depends_on:
+      pki:
+        condition: service_completed_successfully
     command: ["start-dev", "--import-realm"]
     environment:
       KC_HOSTNAME: https://auth.example.test
