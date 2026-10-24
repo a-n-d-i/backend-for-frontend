@@ -75,7 +75,8 @@ end
 local providers = {}
 
 function _M.get(opts)
-    local key = table.concat({opts.issuer, opts.client_id, opts.client_secret, tostring(opts.allow_insecure_http)}, "\0")
+    local key = table.concat({opts.issuer, opts.client_id, opts.client_secret, tostring(opts.allow_insecure_http)},
+                             "\0")
     if not providers[key] then
         providers[key] = _M.new(opts)
     end

@@ -328,7 +328,8 @@ end)
 
 for name, case in pairs({
     ["no events"] = {{events = NULL}, "logout event"},
-    ["event not an object"] = {{events = {["http://schemas.openid.net/event/backchannel-logout"] = "x"}}, "logout event"},
+    ["event not an object"] = {{events = {["http://schemas.openid.net/event/backchannel-logout"] = "x"}},
+                               "logout event"},
     ["other event"] = {{events = {["something-else"] = {}}}, "logout event"},
     ["nonce"] = {{nonce = "n"}, "nonce"},
     ["neither sid nor sub"] = {{sid = NULL, sub = NULL}, "neither sid nor sub"},

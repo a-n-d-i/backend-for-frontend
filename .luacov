@@ -1,0 +1,9 @@
+-- luacov config (`make coverage`): only the plugin's own modules
+return {
+    include = {
+        "lua/apisix/plugins/tokenhandler$",
+        "lua/apisix/plugins/tokenhandler/.+$",
+    },
+    statsfile = "luacov.stats.out",
+    reportfile = "luacov.report.out",
+}

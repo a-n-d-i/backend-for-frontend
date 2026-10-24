@@ -16,6 +16,8 @@ apisix:
     ssl_trusted_certificate: system
   # the tokenhandler plugin: lua/apisix/plugins/tokenhandler.lua
   extra_lua_path: "/workspace/lua/?.lua"
+  # line coverage for `make coverage-e2e`; a no-op otherwise (lua/luacov_gateway.lua)
+  lua_module_hook: "luacov_gateway"
 
 # Only the plugins in use (this list replaces APISIX's default one).
 plugins:

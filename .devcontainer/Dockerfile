@@ -10,7 +10,7 @@ USER root
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3 python3-venv git make sudo curl ca-certificates procps less libnss3-tools \
+        python3 python3-venv git make sudo curl ca-certificates procps less libnss3-tools cloc \
     && rm -rf /var/lib/apt/lists/*
 
 # Re-map the image's apisix user (uid 636) to the host uid and give it a real
@@ -23,6 +23,16 @@ RUN groupmod -o -g "${USER_GID}" apisix \
     && echo "apisix ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/apisix \
     # /etc/profile resets PATH in login shells, drop the venv and claude
     && echo 'export PATH="/home/apisix/.local/bin:/opt/venv/bin:$PATH"' > /etc/profile.d/devcontainer.sh
+
+# Lua static analysis and coverage (`make lint`, `make coverage`): luacheck
+# runs on the system Lua 5.1; luacov is pure Lua and lands in
+# /usr/local/share/lua/5.1, on the module path of OpenResty's `resty` too.
+# The compiler and headers build luafilesystem, a luacheck dependency.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends luarocks liblua5.1-0-dev build-essential \
+    && luarocks install luacheck 1.2.0-1 \
+    && luarocks install luacov 0.16.0-1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Python for the tests, the dev tools and the demo services (the gateway's
 # own plugin is Lua, lua/apisix/plugins/tokenhandler.lua).

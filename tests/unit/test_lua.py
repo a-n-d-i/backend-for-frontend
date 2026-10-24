@@ -16,6 +16,11 @@ LUA_TESTS = sorted((ROOT / "tests" / "lua").glob("test_*.lua"))
 # the shared dicts the plugin declares in conf/config.yaml
 SHARED_DICTS = "lua_shared_dict tokenhandler-cache 1m;"
 REDIS_HOST = os.environ.get("TOKENHANDLER_TEST_REDIS", "redis")
+# `make coverage`: line coverage with luacov (config: .luacov). Started from
+# -e, not from a require()d module: luacov's init runs a coroutine, which in
+# OpenResty cannot yield across require(). The debug hook it counts lines with
+# does not fire in JIT-compiled code, hence jit.off().
+COVERAGE = ["-e", 'jit.off() require("luacov.runner").init()'] if os.environ.get("LUACOV") == "1" else []
 
 
 def redis_reachable():
@@ -32,7 +37,7 @@ def test_lua(path):
         pytest.skip(f"no Redis at {REDIS_HOST}:6379")
     result = subprocess.run(
         ["resty", "--http-conf", SHARED_DICTS, "-I", str(ROOT / "lua"), "-I", str(ROOT / "tests" / "lua"),
-         "-I", "/usr/local/apisix/deps/share/lua/5.1", "-I", "/usr/local/apisix", str(path)],
+         "-I", "/usr/local/apisix/deps/share/lua/5.1", "-I", "/usr/local/apisix", *COVERAGE, str(path)],
         capture_output=True, text=True, timeout=120, cwd=ROOT)
     failures = "\n".join(line for line in result.stdout.splitlines() if not line.startswith("ok - "))
     assert result.returncode == 0, f"{failures}\n{result.stderr}"

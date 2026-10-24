@@ -3,3 +3,6 @@ __pycache__/
 .ruff_cache/
 test-results/
 .dev/
+luacov.stats.out
+luacov.report.out
+.luacov-gateway/

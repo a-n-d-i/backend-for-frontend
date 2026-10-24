@@ -181,7 +181,10 @@ tests/e2e/              the SPA in headless Chromium (Playwright)
 | `make test-e2e`         | SPA browser tests against the running stack             |
 | `make reload`           | apply plugin code and `config.yaml` changes             |
 | `make logs`             | follow the APISIX error log (includes the plugin's log)  |
-| `make lint`             | ruff                                                    |
+| `make loc`              | lines of code by language (cloc)                        |
+| `make lint`             | ruff, luacheck (`.luacheckrc`)                          |
+| `make coverage`         | Lua unit tests with luacov line coverage (`.luacov`)    |
+| `make coverage-e2e`     | line coverage of the plugin in the gateway during the SPA browser tests |
 
 Plugin code is loaded when nginx workers start: after editing `lua/`, run
 `make reload` before running the integration tests (sessions survive it, they

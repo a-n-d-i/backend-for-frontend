@@ -8,6 +8,9 @@
 -- test("name", fn) runs fn; expect_* raise on failure. done() prints a
 -- summary and exits non-zero if anything failed.
 --
+-- With LUACOV=1 in the environment (`make coverage`), tests/unit/test_lua.py
+-- starts luacov before the test file, see there.
+--
 local _M = {passed = 0, failed = 0}
 
 local function describe(v)
@@ -37,7 +40,8 @@ end
 
 function _M.expect_eq(actual, expected, message)
     if actual ~= expected then
-        error((message and (message .. ": ") or "") .. "expected " .. describe(expected) .. ", got " .. describe(actual), 2)
+        error((message and (message .. ": ") or "") .. "expected " .. describe(expected)
+              .. ", got " .. describe(actual), 2)
     end
 end
 
