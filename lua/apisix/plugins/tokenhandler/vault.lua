@@ -41,7 +41,7 @@ end
 -- The value `vault:<path>#<field>` refers to. `fetch` and `cache` for tests.
 function _M.read(ref, addr, token_file, fetch, cache)
     local path, field = _M.parse(ref)
-    cache = cache or ngx.shared["tokenhandler-sessions"]
+    cache = cache or ngx.shared["tokenhandler-cache"]
     local cache_key = "vault:" .. addr .. "|" .. ref
     local cached = cache and cache:get(cache_key)
     if cached then

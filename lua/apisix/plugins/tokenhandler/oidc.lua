@@ -52,7 +52,8 @@ local Provider = {}
 Provider.__index = Provider
 
 -- opts: issuer, client_id, client_secret, allow_insecure_http, http (for tests),
--- replay (a shared dict for seen logout-token jti; nil: worker-local table), clock
+-- replay (a store for seen logout-token jti with ngx.shared.DICT's add(), e.g.
+-- the Redis session store; nil: worker-local table), clock
 function _M.new(opts)
     local self = setmetatable({
         issuer = opts.issuer,

@@ -87,8 +87,22 @@ local schema = {
             properties = {addr = {type = "string"}, token_file = {type = "string"}},
             required = {"addr", "token_file"},
         },
+        -- the session store, shared by all gateway instances, see sessions.lua
+        redis = {
+            type = "object",
+            properties = {
+                host = {type = "string", minLength = 1},
+                port = {type = "integer", minimum = 1, maximum = 65535, default = 6379},
+                database = {type = "integer", minimum = 0, default = 0},
+                -- key prefix, for a Redis shared with other applications
+                prefix = {type = "string", default = "tokenhandler:"},
+                -- connect, send and read timeout, milliseconds
+                timeout = {type = "integer", minimum = 1, default = 1000},
+            },
+            required = {"host"},
+        },
     },
-    required = {"issuer", "client_id", "client_secret", "redirect_uri"},
+    required = {"issuer", "client_id", "client_secret", "redirect_uri", "redis"},
 }
 
 local _M = {
@@ -146,11 +160,12 @@ end
 
 function Bff.new(conf, ctx)
     local self = setmetatable({conf = conf, ctx = ctx}, Bff)
+    self.sessions = sessions.new(conf.redis)
     self.provider = oidc.get({
         issuer = conf.issuer, client_id = conf.client_id, client_secret = conf.client_secret,
         allow_insecure_http = conf.allow_insecure_http,
-        -- seen logout-token jti, shared by all workers
-        replay = ngx.shared["tokenhandler-sessions"],
+        -- seen logout-token jti, in Redis: shared by all workers and gateway instances
+        replay = self.sessions,
     })
     self.origin, self.callback_path = origin_of(conf.redirect_uri)
     return self
@@ -234,7 +249,7 @@ function Bff:login()
         return self:wrong_method("GET")
     end
     -- A login always starts a new session: whatever the browser had is dropped.
-    sessions.delete(self:session_id())
+    self.sessions:delete(self:session_id())
 
     local state, nonce, verifier = util.random_token(32), util.random_token(32), util.random_token(32)
     local now = ngx.now()
@@ -252,7 +267,7 @@ function Bff:login()
     -- the callback is a top-level navigation coming from the authorization
     -- server, a cross-site one if that server is on another site, and a
     -- Strict cookie would not be sent along.
-    return redirect(url, self:cookie(sessions.create(pending), "Lax"))
+    return redirect(url, self:cookie(self.sessions:create(pending), "Lax"))
 end
 
 local function store_tokens(session, tokens)
@@ -284,9 +299,9 @@ function Bff:callback()
         return self:wrong_method("GET")
     end
     local session_id = self:session_id()
-    local pending = sessions.get(session_id)
+    local pending = self.sessions:get(session_id)
     -- single use: the pending login is gone whatever happens next
-    sessions.delete(session_id)
+    self.sessions:delete(session_id)
     if not pending or not pending.state then
         return self:login_failed("no login in progress")
     end
@@ -345,7 +360,7 @@ function Bff:callback()
     -- A new id after authentication: an id the browser had before login
     -- (planted or not) never becomes an authenticated session
     -- [OWASP Session: renew the session ID after login].
-    local new_id = sessions.create(session)
+    local new_id = self.sessions:create(session)
     -- The session cookie is SameSite=Strict [BBA 6.1.3.2]: the SPA calls the BFF same-site only.
     return redirect(pending.return_to, self:cookie(new_id, "Strict"))
 end
@@ -357,7 +372,7 @@ function Bff:session_info()
     if not self:csrf_ok() then
         return self:csrf_refused()
     end
-    local session = sessions.get(self:session_id())
+    local session = self.sessions:get(self:session_id())
     if not session or not session.user then
         return json(200, {authenticated = false})
     end
@@ -372,7 +387,7 @@ function Bff:logout()
     if not self:csrf_ok() then
         return self:csrf_refused()
     end
-    local session = sessions.delete(self:session_id())
+    local session = self.sessions:delete(self:session_id())
     local logout_url
     if session and session.user then
         if session.refresh_token then
@@ -408,7 +423,7 @@ function Bff:backchannel_logout()
     end
 
     -- by session id if given, else every session of the user [2.4]
-    local ended = sessions.delete_by(claims.sid, claims.sub)
+    local ended = self.sessions:delete_by(claims.sid, claims.sub)
     core.log.info("back-channel logout of sid ", tostring(claims.sid), ": ", #ended, " session(s) ended")
     -- [2.8] 200 OK, not cached
     return json(200, {})
@@ -458,9 +473,9 @@ end
 -- API's audience and scope [RFC 8693; RFC 9700 2.3]. Cached in the session
 -- until shortly before it expires; nil if the session is over.
 function Bff:api_token(session_id, api)
-    return sessions.locked(session_id, function()
+    return self.sessions:locked(session_id, function()
         -- the session as it is now, another worker may have refreshed it meanwhile
-        local session = sessions.get(session_id)
+        local session = self.sessions:get(session_id)
         if not session or not session.user then
             return nil
         end
@@ -486,7 +501,7 @@ function Bff:api_token(session_id, api)
         session.service_tokens[api.audience] = {
             token = tokens.access_token, expires_at = ngx.now() + (tonumber(tokens.expires_in) or 60),
         }
-        sessions.save(session_id, session)
+        self.sessions:save(session_id, session)
         return tokens.access_token
     end)
 end
@@ -501,13 +516,13 @@ function Bff:proxy()
         return json(404, {error = "not_found"})
     end
     local session_id = self:session_id()
-    local session = sessions.get(session_id)
+    local session = self.sessions:get(session_id)
     if not session or not session.user then
         return json(401, {error = "unauthenticated"})
     end
     local token = self:api_token(session_id, api)
     if not token then
-        sessions.delete(session_id)
+        self.sessions:delete(session_id)
         return json(401, {error = "session_expired"}, self:cookie("", "Strict", true))
     end
 

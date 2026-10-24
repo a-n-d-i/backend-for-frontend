@@ -30,10 +30,9 @@ nginx_config:
   error_log_level: warn
   http:
     custom_lua_shared_dict:
-      # BFF sessions (shared by all workers), Vault secret cache, seen logout-token ids
-      tokenhandler-sessions: 10m
-      # per-session locks for token refresh and exchange
-      tokenhandler-locks: 1m
+      # Vault secret cache (shared by all workers; the BFF sessions and seen
+      # logout-token ids are in Redis)
+      tokenhandler-cache: 1m
   # Static server for the Vue SPA in spa/, reached through the `spa` route.
   # Loopback only: the browser gets it via APISIX (https://app.example.test), same origin as
   # the BFF, which is what lets the BFF use SameSite=Strict cookies and

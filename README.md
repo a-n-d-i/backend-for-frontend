@@ -157,7 +157,7 @@ lua/apisix/plugins/      the tokenhandler plugin (APISIX `extra_lua_path`)
   tokenhandler.lua      the BFF: endpoints, cookies, CSRF checks, token exchange, API proxying
   tokenhandler/oidc.lua OIDC client: discovery, token endpoint, token exchange,
                         ID and logout token validation (JWS via lua-resty-openssl)
-  tokenhandler/sessions.lua  server-side sessions in a shared memory dict
+  tokenhandler/sessions.lua  server-side sessions in Redis
   tokenhandler/vault.lua     reads `vault:<path>#<field>` secrets with the BFF's own token
   tokenhandler/util.lua      encoding, randomness, back-channel HTTP client
 services/               the resource servers Service A and B (Python), with their
@@ -185,16 +185,19 @@ tests/e2e/              the SPA in headless Chromium (Playwright)
 
 Plugin code is loaded when nginx workers start: after editing `lua/`, run
 `make reload` before running the integration tests (sessions survive it, they
-live in shared memory). The services pick up code changes when their
+live in Redis). The services pick up code changes when their
 containers restart.
 
 ## Notes
 
-- The plugin keeps its state in two shared memory dicts declared in
-  `conf/config.yaml` (`tokenhandler-sessions`: sessions, cached Vault secrets,
-  seen logout-token ids; `tokenhandler-locks`: per-session locks for token
-  refresh and exchange), so all nginx workers agree. A gateway restart ends
-  all sessions; thanks to the Keycloak SSO session, the next login is silent.
+- The plugin keeps sessions, the per-session locks for token refresh and
+  exchange, and the ids of seen logout tokens in Redis (the `redis` service;
+  plugin option `redis`), so all nginx workers and gateway instances agree,
+  and sessions survive a gateway restart. Cached Vault secrets stay in the
+  shared memory dict `tokenhandler-cache` declared in `conf/config.yaml`, per
+  gateway.
+  `tests/lua/test_sessions.lua` needs the Redis (`TOKENHANDLER_TEST_REDIS`,
+  default `redis`) and is skipped without one.
 - `conf/config.yaml` lists the plugins in use (`plugins:` replaces APISIX's
   default list); add a plugin there before using it in `apisix.yaml`.
 - The realm file is a Keycloak export (built through the admin API, then

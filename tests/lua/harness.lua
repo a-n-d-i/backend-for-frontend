@@ -2,7 +2,7 @@
 -- Minimal test harness for the plugin's Lua modules, run with the `resty`
 -- CLI (tests/unit/test_lua.py does that for pytest):
 --
---   resty --shdict "tokenhandler-sessions 1m" --shdict "tokenhandler-locks 1m" \
+--   resty --shdict "tokenhandler-cache 1m" \
 --         -I lua -I /usr/local/apisix/deps/share/lua/5.1 tests/lua/test_oidc.lua
 --
 -- test("name", fn) runs fn; expect_* raise on failure. done() prints a

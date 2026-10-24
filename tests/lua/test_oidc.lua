@@ -317,9 +317,9 @@ t.test("logout token cannot be replayed (worker-local and shared)", function()
     t.expect_error(function() p:validate_logout_token(token) end, "replayed")
 
     local shared = oidc.new({issuer = ISSUER, client_id = "bff", client_secret = "s", http = fake().http,
-                             replay = ngx.shared["tokenhandler-sessions"], clock = function() return NOW end})
+                             replay = ngx.shared["tokenhandler-cache"], clock = function() return NOW end})
     local second = oidc.new({issuer = ISSUER, client_id = "bff", client_secret = "s", http = fake().http,
-                             replay = ngx.shared["tokenhandler-sessions"], clock = function() return NOW end})
+                             replay = ngx.shared["tokenhandler-cache"], clock = function() return NOW end})
     token = logout_token()
     shared:validate_logout_token(token)
     -- another worker's provider sees it too

@@ -84,10 +84,21 @@ services:
     depends_on:
       keycloak-init:
         condition: service_completed_successfully
+      redis:
+        condition: service_started
       service-a:
         condition: service_started
       service-b:
         condition: service_started
+
+  # The BFF's session store (lua/apisix/plugins/tokenhandler/sessions.lua),
+  # shared by all gateway instances. Inside the network only, no port on the
+  # host; append-only file in the redis-data volume, so sessions survive restarts.
+  redis:
+    image: redis:8.2.2
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
 
   # Authorization server; realm, clients and user in conf/keycloak/demo-realm.json
   # (no secrets in it). Behind the gateway: TLS ends there, Keycloak knows its
@@ -147,4 +158,5 @@ services:
 
 volumes:
   claude-config:
+  redis-data:
   vault-data:
