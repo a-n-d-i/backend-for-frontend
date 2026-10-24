@@ -11,9 +11,29 @@ apisix:
     enable: true
     listen:
       - port: 443
+    # trust anchors for the BFF's back-channel TLS (Keycloak): the system
+    # store, which holds the CA of Vault's PKI (installed by gateway-entrypoint.sh)
+    ssl_trusted_certificate: system
+  # the tokenhandler plugin: lua/apisix/plugins/tokenhandler.lua
+  extra_lua_path: "/workspace/lua/?.lua"
+
+# Only the plugins in use (this list replaces APISIX's default one).
+plugins:
+  - redirect          # global rule: http -> https
+  - response-rewrite  # global rule: HSTS
+  - proxy-rewrite     # strips /api/a, /api/b
+  - tokenhandler      # the BFF
+# no TCP/UDP (stream) proxying
+stream_plugins: []
 
 nginx_config:
   error_log_level: warn
+  http:
+    custom_lua_shared_dict:
+      # BFF sessions (shared by all workers), Vault secret cache, seen logout-token ids
+      tokenhandler-sessions: 10m
+      # per-session locks for token refresh and exchange
+      tokenhandler-locks: 1m
   # Static server for the Vue SPA in spa/, reached through the `spa` route.
   # Loopback only: the browser gets it via APISIX (https://app.example.test), same origin as
   # the BFF, which is what lets the BFF use SameSite=Strict cookies and
@@ -38,8 +58,3 @@ nginx_config:
             add_header Referrer-Policy no-referrer always;
         }
     }
-
-# APISIX spawns the runner itself and talks to it over a unix socket
-# (APISIX_LISTEN_ADDRESS). It restarts the runner when it exits.
-ext-plugin:
-  cmd: ["/opt/venv/bin/python", "/opt/apisix-python-plugin-runner/bin/py-runner", "start"]

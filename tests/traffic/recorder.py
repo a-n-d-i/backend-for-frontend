@@ -8,8 +8,8 @@ Two sides are joined per test:
   Playwright browser context (static assets left out);
 - what the BFF and the services do for those requests (back-channel calls,
   the forwarded API request, their decisions), which they write to BFF_TRACE
-  when the request carries X-Trace-Id (plugins/trace.py; `trace_file` in
-  conf/apisix.yaml, TRACE_FILE for the services). The BFF also records
+  when the request carries X-Trace-Id (lua/apisix/plugins/tokenhandler/trace.lua
+  with `trace_file` in conf/apisix.yaml; services/trace.py with TRACE_FILE). The BFF also records
   Keycloak's back-channel logout requests under the trace of the login.
 
 Disable with `-p no:tests.traffic.recorder`.

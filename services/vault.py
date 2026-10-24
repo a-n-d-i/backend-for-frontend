@@ -1,11 +1,11 @@
 """
-Secrets from HashiCorp Vault (KV engine v1) for the BFF and the services.
+Secrets from HashiCorp Vault (KV engine v1) for the services (the BFF has the
+same in Lua: lua/apisix/plugins/tokenhandler/vault.lua).
 
 A configuration value `vault:<path>#<field>`, e.g. `vault:kv/bff#client_secret`,
 is replaced by that field of the secret at `<path>`. Each component reads with
 its own token, whose policy allows only its own secrets; the token comes from
-a file, so a new one (re-issued on every stack start) is picked up without a
-restart. Values are cached for a few minutes, so a rotated secret arrives
+a file, so a replaced one is picked up without a restart. Values are cached for a few minutes, so a rotated secret arrives
 within that time.
 """
 import json
@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-from . import trace  # relative: also imported as `plugins` by the services
+from services import trace
 
 PREFIX = "vault:"
 CACHE_SECONDS = 300

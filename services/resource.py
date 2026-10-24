@@ -33,7 +33,7 @@ from typing import Optional
 
 import jwt
 
-from plugins import trace, vault
+from services import trace, vault
 from services.web import Request, Response, TracedJwks, json_response, post_form, serve
 
 ALGORITHMS = ["RS256", "PS256", "ES256"]

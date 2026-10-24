@@ -1,7 +1,7 @@
 # OAuth / OpenID Connect best practices: where the token handler stands
 
 This document lists the IETF and OWASP best practices that apply to the token handler
-([`plugins/tokenhandler.py`](../plugins/tokenhandler.py)). The token handler is a Backend for
+([`lua/apisix/plugins/tokenhandler.lua`](../lua/apisix/plugins/tokenhandler.lua), a native APISIX plugin). The token handler is a Backend for
 Frontend (BFF) for the Vue SPA in [`spa/`](../spa/), in front of the two resource servers in
 [`services/`](../services/), with Keycloak as the authorization server. For each practice it
 says where the code or configuration implements it, or why it doesn't.
@@ -84,10 +84,10 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 
 | Requirement | Status | Where / why |
 |---|---|---|
-| The BFF handles the OAuth flow, keeps the tokens, and forwards API requests with an access token. Tokens are never exposed to the browser (6.1.1). | ✅ | `Bff.login`, `Bff.callback`, `Bff.proxy`. `/bff/session` returns selected claims only. Tested in `test_tokens_and_session_are_out_of_javascripts_reach` (e2e) and `test_api_call_gets_a_token_for_that_service_instead_of_the_cookie`. |
+| The BFF handles the OAuth flow, keeps the tokens, and forwards API requests with an access token. Tokens are never exposed to the browser (6.1.1). | ✅ | `Bff:login`, `Bff:callback`, `Bff:proxy`. `/bff/session` returns selected claims only. Tested in `test_tokens_and_session_are_out_of_javascripts_reach` (e2e) and `test_api_call_gets_a_token_for_that_service_instead_of_the_cookie`. |
 | Endpoints: check session, login, callback, logout (6.1.2.1). | ✅ | `GET /bff/session`, `GET /bff/login?return_to=`, `GET /bff/callback` (path taken from `redirect_uri`), `POST /bff/logout`, and `POST /bff/backchannel-logout` for Keycloak. |
-| Refresh tokens: stored in the session, used with client authentication; the session lifetime should match the refresh token lifetime (6.1.2.2). | ✅ | `Bff._fresh_access_token` refreshes 30 s (`refresh_margin`) before the access token expires, including before a token exchange, and keeps the rotated refresh token. BFF session: 8 h absolute, 30 min idle (`DEFAULTS`); Keycloak SSO session: the same (`ssoSessionMaxLifespan`, `ssoSessionIdleTimeout`). Refreshes and exchanges of one session are serialized, so rotation can't spend a refresh token twice. No `offline_access`: offline tokens would outlive the SSO session and a single logout. |
-| Cookie-based session state: server-side, or client-side signed and encrypted (6.1.2.3). | ✅ | Server-side: [`plugins/sessions.py`](../plugins/sessions.py). The cookie holds only a 256-bit random id. |
+| Refresh tokens: stored in the session, used with client authentication; the session lifetime should match the refresh token lifetime (6.1.2.2). | ✅ | `Bff:fresh_access_token` refreshes 30 s (`refresh_margin`) before the access token expires, including before a token exchange, and keeps the rotated refresh token. BFF session: 8 h absolute, 30 min idle (plugin schema defaults); Keycloak SSO session: the same (`ssoSessionMaxLifespan`, `ssoSessionIdleTimeout`). Refreshes and exchanges of one session are serialized, so rotation can't spend a refresh token twice. No `offline_access`: offline tokens would outlive the SSO session and a single logout. |
+| Cookie-based session state: server-side, or client-side signed and encrypted (6.1.2.3). | ✅ | Server-side: [`tokenhandler/sessions.lua`](../lua/apisix/plugins/tokenhandler/sessions.lua), a shared memory dict of the gateway. The cookie holds only a 256-bit random id. |
 | Combining OAuth and OIDC: `openid` scope, keep ID token info in the session, return it on session check (6.1.2.4). | ✅ | Scope `openid profile email`. `USER_CLAIMS` limits what the SPA sees to `sub`, `name`, `preferred_username`, `email` and `email_verified`. The ID token's `sid` is kept for back-channel logout. |
 | Practical deployment (6.1.2.5). | ✅ | The BFF is a gateway plugin in front of SPA and APIs, so they share one origin (`app.example.test`). |
 
@@ -95,16 +95,16 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 
 | Requirement | Status | Where / why |
 |---|---|---|
-| **MUST** be a confidential client (6.1.3.1). | ✅ | `client_secret_basic` at the token endpoint, `Provider._post`; client `bff` is confidential in the realm. |
+| **MUST** be a confidential client (6.1.3.1). | ✅ | `client_secret_basic` at the token endpoint, `Provider:post`; client `bff` is confidential in the realm. |
 | **MUST** use the authorization code grant (6.1.3.1). | ✅ | `response_type=code` only. In the realm, the `bff` client has the standard flow only (no implicit, no direct access grants). |
-| PKCE (6.1.1; 6.3.2.1). | ✅ | S256, verifier of 256 random bits, `Bff.login`. The BFF refuses to run if the metadata doesn't list `S256`. Keycloak requires S256 for this client (`pkce.code.challenge.method`). |
-| Cookie: **MUST** `Secure` (6.1.3.2). | ✅ | `Bff._cookie`. |
-| Cookie: **MUST** `HttpOnly` (6.1.3.2). | ✅ | `Bff._cookie`. The e2e test checks that `document.cookie` is empty. |
+| PKCE (6.1.1; 6.3.2.1). | ✅ | S256, verifier of 256 random bits, `Bff:login`. The BFF refuses to run if the metadata doesn't list `S256`. Keycloak requires S256 for this client (`pkce.code.challenge.method`). |
+| Cookie: **MUST** `Secure` (6.1.3.2). | ✅ | `Bff:cookie`. |
+| Cookie: **MUST** `HttpOnly` (6.1.3.2). | ✅ | `Bff:cookie`. The e2e test checks that `document.cookie` is empty. |
 | Cookie: **SHOULD** `SameSite=Strict` (6.1.3.2). | ✅ with one exception | The session cookie is `Strict`. The cookie of a login in flight is `Lax`, because the callback is a top-level navigation coming from the authorization server and browsers don't send a `Strict` cookie on it in general. That cookie can only finish this one login, which also needs the matching `state`. The callback replaces it with a new `Strict` cookie. |
-| Cookie: **SHOULD** `Path=/`, **SHOULD NOT** `Domain` (6.1.3.2). | ✅ | `Bff._cookie`. |
-| Cookie name **SHOULD** use a prefix showing it was set via HTTP, e.g. `__Host-Http-` (6.1.3.2). | ✅ | `__Host-Http-bff-session` (`DEFAULTS["cookie_name"]`). The browser rejects it unless it is `Secure`, `HttpOnly`, `Path=/`, without `Domain`, from https. |
+| Cookie: **SHOULD** `Path=/`, **SHOULD NOT** `Domain` (6.1.3.2). | ✅ | `Bff:cookie`. |
+| Cookie name **SHOULD** use a prefix showing it was set via HTTP, e.g. `__Host-Http-` (6.1.3.2). | ✅ | `__Host-Http-bff-session` (schema default `cookie_name`). The browser rejects it unless it is `Secure`, `HttpOnly`, `Path=/`, without `Domain`, from https. |
 | **SHOULD** encrypt cookie contents with client-side sessions (6.1.3.2). | ➖ | Server-side sessions: the cookie is an opaque id. |
-| **MUST** implement a CSRF defense (6.1.3.3). | ✅ | `Bff._csrf_ok` on `/bff/session`, `/bff/logout` and every API request. |
+| **MUST** implement a CSRF defense (6.1.3.3). | ✅ | `Bff:csrf_ok` on `/bff/session`, `/bff/logout` and every API request. |
 | SameSite as CSRF defense, adequate only if never same-site with other apps (6.1.3.3.1). | ✅ (not relied on alone) | `app.example.test` and `auth.example.test` *are* same-site, so SameSite alone would not do. The custom header below does, and the e2e test `test_other_origin_cannot_use_the_session` attacks from `auth.example.test`. |
 | CORS: **SHOULD** require a custom request header; **MUST** check that every request carries it (6.1.3.3.2). | ✅ | `X-BFF-CSRF: 1` is required. The BFF sends no CORS headers and refuses preflights (403). The `bff` client has no web origins in Keycloak either. |
 | Anti-forgery / double-submit cookies (6.1.3.3.3). | ➖ | Optional alternative; the custom-header defense is used instead. |
@@ -126,16 +126,16 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 
 | Practice | Status | Where / why |
 |---|---|---|
-| Audience-restricted access tokens: each token is good for one resource server only (RFC 9700 2.3, 4.10.2; OWASP OAuth2 #14). | ✅ | The BFF's login token has no `aud`. For each API it is exchanged (RFC 8693) for a token with `aud` = that service only (`Bff._api_token`, `Provider.exchange_token`). In the realm, the `api-a`/`api-b` client scopes add the audiences and are *optional* scopes of `bff`, so they appear only on request. Keycloak refuses audiences the client may not ask for (`test_exchange_refuses_mismatched_requests`). |
+| Audience-restricted access tokens: each token is good for one resource server only (RFC 9700 2.3, 4.10.2; OWASP OAuth2 #14). | ✅ | The BFF's login token has no `aud`. For each API it is exchanged (RFC 8693) for a token with `aud` = that service only (`Bff:api_token`, `Provider:exchange_token`). In the realm, the `api-a`/`api-b` client scopes add the audiences and are *optional* scopes of `bff`, so they appear only on request. Keycloak refuses audiences the client may not ask for (`test_exchange_refuses_mismatched_requests`). |
 | Least privilege: minimal scope per token (RFC 9700 2.3; OWASP OAuth2 #13, #15). | ✅ | Each exchange asks for the one scope of that service (`apis` config). `POST /items` needs `api-a.write`, which nobody is granted, so it answers 403 `insufficient_scope` (`test_scope_is_enforced`). |
-| Token exchange per RFC 8693: client authentication, `subject_token_type`, `requested_token_type`, `audience`; response `issued_token_type`, not cached (2.1, 2.2.1). | ✅ | `Provider.exchange_token` sends all of them and checks `issued_token_type`. Standard token exchange is enabled for the `bff` client only. Keycloak exchanges access tokens, not ID tokens. |
+| Token exchange per RFC 8693: client authentication, `subject_token_type`, `requested_token_type`, `audience`; response `issued_token_type`, not cached (2.1, 2.2.1). | ✅ | `Provider:exchange_token` sends all of them and checks `issued_token_type`. Standard token exchange is enabled for the `bff` client only. Keycloak exchanges access tokens, not ID tokens. |
 | Resource servers verify every token themselves: signature, issuer, expiry, audience, scope (RFC 9068 4; RFC 6750). | ✅ | [`services/resource.py`](../services/resource.py), `ResourceServer.authenticate`, on every request. A token for the other service, the BFF's own token, an ID token, a forged or tampered token are all rejected (`test_services_accept_only_tokens_meant_for_them`, run directly against the services, bypassing the gateway). |
 | Explicitly typed access tokens, so an ID token can't pass as one (RFC 9068 2.1, 4). | ✅ | Keycloak issues `typ: at+jwt` for the `bff` client (`access.token.header.type.rfc9068`). The services require it. |
 | Revocation reaches the resource servers (RFC 7662). | ✅ | The services introspect every token with their own client credentials. A token of an ended SSO session, or one meant for another audience, introspects as inactive (`test_services_check_with_keycloak_that_a_token_is_still_active`). Failure to introspect fails closed. The trade-off is one call to Keycloak per request; caching active results for a few seconds would be the usual optimization. |
 | Rejections per RFC 6750: `401` with `WWW-Authenticate: Bearer error="invalid_token"`, `403` with `insufficient_scope`. | ✅ | `ResourceServer._guarded`. |
 | Single sign-on: one login for all applications of the realm. | ✅ | Keycloak SSO session. One BFF login gives tokens for both services with the same `sub` and `sid`. Keycloak's account console, another client of the realm, opens without a password (`test_single_sign_on_*`, e2e `test_single_sign_on_and_single_logout_with_another_application`). |
-| Single logout, back-channel (OIDC BCL): the RP receives a logout token when the session at the OP ends, and ends its own sessions. | ✅ | The `bff` client has `backchannel.logout.url` and `backchannel.logout.session.required`. `Bff.backchannel_logout` handles it without cookie or CSRF header, since the signed logout token is the authentication. It ends every BFF session with that `sid` (or of that `sub`) and answers 200 with `no-store` (2.8). Tested in `test_single_logout_back_channel` and `test_single_logout_ends_every_bff_session_of_that_keycloak_session`. |
-| Logout token validation (OIDC BCL 2.6): signature, `iss`, `aud`, `iat`, `jti`, `sid` or `sub`, the `events` member, no `nonce`, explicit type, replay detection. | ✅ | `Provider.validate_logout_token`, every rule unit-tested in [`tests/unit/test_oidc.py`](../tests/unit/test_oidc.py). An ID token is refused as logout token (`test_back_channel_logout_refuses_invalid_logout_tokens`). |
+| Single logout, back-channel (OIDC BCL): the RP receives a logout token when the session at the OP ends, and ends its own sessions. | ✅ | The `bff` client has `backchannel.logout.url` and `backchannel.logout.session.required`. `Bff:backchannel_logout` handles it without cookie or CSRF header, since the signed logout token is the authentication. It ends every BFF session with that `sid` (or of that `sub`) and answers 200 with `no-store` (2.8). Tested in `test_single_logout_back_channel` and `test_single_logout_ends_every_bff_session_of_that_keycloak_session`. |
+| Logout token validation (OIDC BCL 2.6): signature, `iss`, `aud`, `iat`, `jti`, `sid` or `sub`, the `events` member, no `nonce`, explicit type, replay detection. | ✅ | `Provider:validate_logout_token`, every rule unit-tested in [`tests/lua/test_oidc.lua`](../tests/lua/test_oidc.lua). An ID token is refused as logout token (`test_back_channel_logout_refuses_invalid_logout_tokens`). |
 | Back-channel logout to the resource servers. | ➖ | Keycloak sends back-channel logout only to clients with a session; the services only receive exchanged tokens. Their introspection gives the same effect. |
 | Zero-trust network: mutual TLS between gateway and services. | ❌ | The hops inside the Docker network (APISIX → Keycloak, APISIX → services) are plain http. The services don't depend on it; they trust only the token. Production: mTLS or a service mesh. |
 
@@ -146,21 +146,21 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 | Practice | Status | Where / why |
 |---|---|---|
 | 2.1 Exact redirect URI matching by the authorization server. | 🅰️ ✅ | One redirect URI registered for `bff`, matched exactly by Keycloak. |
-| 2.1 Clients **MUST NOT** expose open redirectors. | ✅ | `return_to` must be a path on this origin (`_local_path`). Rejected values fall back to `/`. Tested for `//host`, `/\host`, schemes, CR/LF and over-long values. |
-| 2.1 CSRF protection of the redirect: PKCE, OIDC `nonce`, or `state` bound to the user agent. | ✅ | All three. `state` and `nonce` are bound to the browser through the pending-login cookie and compared in constant time (`Bff.callback`). |
+| 2.1 Clients **MUST NOT** expose open redirectors. | ✅ | `return_to` must be a path on this origin (`util.local_path`). Rejected values fall back to `/`. Tested for `//host`, `/\host`, schemes, CR/LF and over-long values. |
+| 2.1 CSRF protection of the redirect: PKCE, OIDC `nonce`, or `state` bound to the user agent. | ✅ | All three. `state` and `nonce` are bound to the browser through the pending-login cookie and compared in constant time (`Bff:callback`). |
 | 2.1 Mix-up defense; use `iss` (RFC 9207). | ✅ | Keycloak sends `iss` in the authorization response and advertises it; the BFF requires it to equal the issuer (`test_callback_rejects_foreign_issuer`). |
-| 2.1 Don't forward user credentials on redirects (307). | ✅ / 🅰️ | The BFF never receives credentials. Back-channel calls never follow redirects (`_NoRedirect`). Keycloak answers its login form with 302. |
+| 2.1 Don't forward user credentials on redirects (307). | ✅ / 🅰️ | The BFF never receives credentials. Back-channel calls never follow redirects (`util.http`). Keycloak answers its login form with 302. |
 | 2.1.1 Public clients **MUST**, confidential clients **SHOULD** use PKCE. | ✅ | S256 always. |
 | 2.1.1 Authorization servers **MUST** support PKCE and prevent PKCE downgrade. | 🅰️ ✅ | Keycloak requires S256 for `bff`. The BFF never sends `plain`. |
 | 2.1.2 No implicit grant (`response_type=token`). | ✅ / 🅰️ | Code flow only; implicit flow disabled for `bff`. |
 | 2.2.1 Sender-constrained access tokens (mTLS / DPoP), **SHOULD**. | ❌ | Keycloak supports DPoP and mTLS-bound tokens; not used yet. The browser holds no token, which removes the main theft vector. The tokens that travel (BFF → services) are audience-restricted, short-lived (5 min) and introspected. |
-| 2.2.2 Refresh tokens of public clients sender-constrained or rotated. | ➖ / 🅰️ ✅ | The BFF is confidential: its refresh tokens need the client secret. Rotation is on anyway (`revokeRefreshToken`, `refreshTokenMaxReuse: 0`), and `_store_tokens` keeps the new token. |
+| 2.2.2 Refresh tokens of public clients sender-constrained or rotated. | ➖ / 🅰️ ✅ | The BFF is confidential: its refresh tokens need the client secret. Rotation is on anyway (`revokeRefreshToken`, `refreshTokenMaxReuse: 0`), and `store_tokens` keeps the new token. |
 | 2.3 Least privilege, audience-restricted access tokens. | ✅ | See section 2. |
 | 2.4 No resource owner password credentials grant. | ✅ / 🅰️ | Not used; direct access grants are disabled for `bff`. The user enters the password only at Keycloak. |
 | 2.5 Client authentication, asymmetric preferred (`private_key_jwt`, mTLS). | ✅ / ❌ | `client_secret_basic` (form-urlencoded per RFC 6749 2.3.1) for the BFF and for the services' introspection. Keycloak supports `private_key_jwt`; not used yet. |
 | 2.6 Use authorization server metadata (RFC 8414). | ✅ | Endpoints come from discovery. `issuer` in the document must equal the configured issuer (RFC 8414 3.3), in the BFF and in the services. |
 | 2.6 Clients **SHOULD NOT** influence `client_id` / `sub` confusion. | 🅰️ | Keycloak's client config; no dynamic client registration is used. |
-| 2.6 End-to-end TLS; authorization responses **MUST NOT** go over unencrypted connections; no `http` redirect URIs. | ✅ / 🔧 | Browser ↔ gateway and BFF ↔ Keycloak are HTTPS on the public names, verified against the dev CA (`ca_file`; the BFF refuses non-https endpoints unless `allow_insecure_http`). The redirect URI is https. Plain http only redirects. Inside the Docker network, behind the TLS-terminating gateway, hops are http (🔧, see section 2). |
+| 2.6 End-to-end TLS; authorization responses **MUST NOT** go over unencrypted connections; no `http` redirect URIs. | ✅ / 🔧 | Browser ↔ gateway and BFF ↔ Keycloak are HTTPS on the public names, verified against the system trust store, which holds the CA of Vault's PKI (`lua_ssl_trusted_certificate`; the BFF refuses non-https endpoints unless `allow_insecure_http`). The redirect URI is https. Plain http only redirects. Inside the Docker network, behind the TLS-terminating gateway, hops are http (🔧, see section 2). |
 | 2.6 No CORS at the authorization endpoint. | 🅰️ ✅ | `bff` has no web origins. |
 | 2.6 Strict origin checks for in-browser messaging (`postMessage`). | ➖ | Not used by the SPA. |
 
@@ -178,10 +178,10 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 | 4.8 PKCE downgrade. | ✅ / 🅰️ | S256 required in metadata, always sent, and required by Keycloak for this client. |
 | 4.9 Access token leakage at the resource server. | ✅ | A token that leaks at Service A is useless at Service B (audience), at the latest after 5 minutes, and immediately after logout (introspection). |
 | 4.10 Misuse of stolen access tokens. | ✅ (partly) | Audience restriction and introspection as above; no sender-constraining (2.2.1). |
-| 4.11 Open redirection (client and authorization server). | ✅ / 🅰️ | `_local_path` for the client; Keycloak validates `redirect_uri` and `post_logout_redirect_uri` against the registered ones. |
+| 4.11 Open redirection (client and authorization server). | ✅ / 🅰️ | `util.local_path` for the client; Keycloak validates `redirect_uri` and `post_logout_redirect_uri` against the registered ones. |
 | 4.12 307 redirect. | ✅ / 🅰️ | Back channel follows no redirects. Keycloak uses 302. |
 | 4.13 TLS-terminating reverse proxies. | ✅ / 🔧 | APISIX terminates TLS and sets `X-Forwarded-*`. Keycloak has a fixed public URL (`KC_HOSTNAME`) and reads `X-Forwarded-*` (`KC_PROXY_HEADERS`). From outside it is reachable only through the gateway; production should also limit those headers to the proxy's address (`proxy-trusted-addresses`). The BFF trusts no forwarded headers: its origin comes from the configured `redirect_uri`. |
-| 4.14 Refresh token protection. | ✅ | Confidential client, rotation, idle and absolute expiry, no offline tokens. At logout the refresh token is revoked (RFC 7009, `Provider.revoke`), and the SSO session ends via RP-initiated logout. |
+| 4.14 Refresh token protection. | ✅ | Confidential client, rotation, idle and absolute expiry, no offline tokens. At logout the refresh token is revoked (RFC 7009, `Provider:revoke`), and the SSO session ends via RP-initiated logout. |
 | 4.15 Client impersonating the resource owner. | 🅰️ | Keycloak config. |
 | 4.16 Clickjacking. | ✅ / 🅰️ | SPA: `frame-ancestors 'none'` and `X-Frame-Options: DENY`. Keycloak protects its own pages. |
 | 4.17 In-browser communication flows. | ➖ | No `postMessage` or popup flows in the SPA. |
@@ -190,12 +190,12 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 
 | Practice | Status | Where / why |
 |---|---|---|
-| RFC 7636 PKCE: verifier of 43–128 characters from a CSPRNG; `S256`. | ✅ | `secrets.token_urlsafe(32)` gives 43 characters and 256 bits. The challenge is `BASE64URL(SHA256(verifier))`. |
+| RFC 7636 PKCE: verifier of 43–128 characters from a CSPRNG; `S256`. | ✅ | `util.random_token(32)` (`resty.random`, strong) gives 43 characters and 256 bits. The challenge is `BASE64URL(SHA256(verifier))` (tested against RFC 7636 appendix B). |
 | RFC 6749 10.12 / RFC 9700 4.7: unguessable `state`, bound to the user agent. | ✅ | 256-bit `state` in the pending session behind the cookie. |
-| OIDC Core 3.1.2.1 / 3.1.3.7: `nonce` sent and checked. | ✅ | `Provider.validate_id_token`. |
-| OIDC Core 3.1.3.7 ID token validation: issuer exact, audience is the client with no extra untrusted audiences, `azp` if present, signature with keys from `jwks_uri`, algorithm allowlist (no `none`, no HMAC), `exp`, `iat`, `nonce`. | ✅ | `Provider.validate_id_token`, tested for every rule. A 60 s leeway allows for clock skew. Keys are cached and refetched for an unknown `kid` (key rotation). |
-| OIDC Core 12.2: ID token from a refresh has the same `iss`, `sub` and `aud`. | ✅ | `validate_id_token(..., expected_sub=...)` in `_fresh_access_token`. |
-| RFC 7009 token revocation at logout. | ✅ | `Bff.logout` revokes the refresh token. |
+| OIDC Core 3.1.2.1 / 3.1.3.7: `nonce` sent and checked. | ✅ | `Provider:validate_id_token`. |
+| OIDC Core 3.1.3.7 ID token validation: issuer exact, audience is the client with no extra untrusted audiences, `azp` if present, signature with keys from `jwks_uri`, algorithm allowlist (no `none`, no HMAC), `exp`, `iat`, `nonce`. | ✅ | `Provider:validate_id_token`, tested for every rule. A 60 s leeway allows for clock skew. Keys are cached and refetched for an unknown `kid` (key rotation). |
+| OIDC Core 12.2: ID token from a refresh has the same `iss`, `sub` and `aud`. | ✅ | `Provider:validate_id_token(token, nil, expected_sub)` in `Bff:fresh_access_token`. |
+| RFC 7009 token revocation at logout. | ✅ | `Bff:logout` revokes the refresh token. |
 | OpenID RP-Initiated Logout 1.0. | ✅ | `/bff/logout` returns `logout_url` with `id_token_hint`, `client_id` and the registered `post_logout_redirect_uri`. The SPA navigates there, and Keycloak ends the SSO session without asking and returns to the app (`test_rp_initiated_logout_ends_the_keycloak_session`). |
 | OpenID Back-Channel Logout 1.0. | ✅ | See section 2. |
 | OpenID Front-Channel Logout. | ➖ | Back-channel is used instead; it needs no third-party iframes or cookies. |
@@ -205,7 +205,7 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 
 | # | Recommendation (abridged) | Status | Where / why |
 |---|---|---|---|
-| 1 | No open redirectors in clients or authorization servers. | ✅ | `_local_path`; Keycloak's exact redirect URI matching. |
+| 1 | No open redirectors in clients or authorization servers. | ✅ | `util.local_path`; Keycloak's exact redirect URI matching. |
 | 2 | If PKCE is the CSRF protection, make sure the server supports it; otherwise use one-time `state`; OIDC uses `nonce`. | ✅ | All three. |
 | 3 | Use `iss` against mix-up. | ✅ | RFC 9207, checked. |
 | 4 | Without other mix-up defenses, use distinct redirect URIs per authorization server. | ➖ | One authorization server, and `iss` is checked. |
@@ -226,18 +226,18 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 
 | Practice | Status | Where / why |
 |---|---|---|
-| Session id from a CSPRNG with at least 64 bits of entropy. | ✅ | 256 bits, `secrets.token_urlsafe(32)` (`SessionStore.create`). |
+| Session id from a CSPRNG with at least 64 bits of entropy. | ✅ | 256 bits from the OS CSPRNG, `util.random_token(32)` (`sessions.create`). |
 | Session id is meaningless (no data in it). | ✅ | Opaque id. The store keys sessions by SHA-256 of the id, so a dump of the store holds no usable cookie values. |
 | Generic session cookie name (no fingerprinting). | ✅ / trade-off | `__Host-Http-bff-session` is required in part by the BBA cookie-prefix rule. "bff" reveals little. Configurable with `cookie_name`. |
 | Cookie attributes `Secure`, `HttpOnly`, `SameSite`, narrow `Domain`/`Path`. | ✅ | See BBA 6.1.3.2. |
 | Non-persistent cookie (no `Expires`/`Max-Age`). | ✅ | It disappears when the browser closes. The server enforces its own lifetimes. |
 | Renew the session id on privilege change (login). | ✅ | The pending-login id is dropped at the callback and a new id is issued (`test_pre_login_session_id_is_not_authenticated`). Each `/bff/login` also discards the previous session. |
-| Idle timeout and absolute timeout, enforced server-side. | ✅ | 30 min / 8 h, checked on every lookup (`SessionStore.get`), the same as the Keycloak SSO session. A login in flight expires after 10 min. |
-| Logout invalidates the session server-side, also when it happens elsewhere. | ✅ | `Bff.logout` deletes the session, and back-channel logout deletes it when the SSO session ends elsewhere. The old cookie is useless afterwards. |
+| Idle timeout and absolute timeout, enforced server-side. | ✅ | 30 min / 8 h, checked on every lookup (`sessions.get`), the same as the Keycloak SSO session. A login in flight expires after 10 min. |
+| Logout invalidates the session server-side, also when it happens elsewhere. | ✅ | `Bff:logout` deletes the session, and back-channel logout deletes it when the SSO session ends elsewhere. The old cookie is useless afterwards. |
 | Don't cache session-bearing responses (`Cache-Control: no-store`). | ✅ | All BFF and service responses. |
 | Bind the session to client properties (IP, User-Agent) to detect hijacking. | ❌ | IP binding breaks mobile users and NAT, and User-Agent is attacker-controlled. `HttpOnly` + `Secure` + `__Host-` + short lifetimes are the protection. |
 | Log session lifecycle and security events. | ✅ | Logins, failed callbacks, failed refreshes and exchanges, back-channel logouts and CSRF rejections are logged by the `tokenhandler` logger into the APISIX error log (`make logs`). Session ids and tokens are never logged, except in the dev-only traffic trace (`trace_file` / `TRACE_FILE`, see README), which records requests carrying `X-Trace-Id` in full for the test report and must stay unset in production. |
-| Session store survives restarts, is shared across instances. | ❌ | In-memory in the runner process, which serves all APISIX workers. It is lost on runner restart (users log in again, silently thanks to SSO) and not shared between gateway instances. Production with more than one gateway needs a shared store (e.g. Redis) behind the `SessionStore` interface. |
+| Session store survives restarts, is shared across instances. | ❌ / partly | A shared memory dict (`lua_shared_dict tokenhandler-sessions`) shared by all nginx workers. It survives `make reload` but not a gateway restart (users log in again, silently thanks to SSO), and isn't shared between gateway instances. Production with more than one gateway needs a shared store (e.g. Redis) behind the functions of `sessions.lua`. |
 
 ## 7. OWASP CSRF Prevention Cheat Sheet
 
@@ -283,6 +283,6 @@ All secrets of the stack and its PKI are in Vault: one server with persistent st
 
 - **Vault's root token and unseal key on disk** (`.dev/`, gitignored, never published). Whoever has them can read every secret and issue certificates that browsers trusting this CA accept for `*.example.test` (see the warning in the README).
 - **Plain http inside the Docker network** (also to Vault). See sections 2 and 9.
-- **In-memory sessions.** See section 6.
+- **Sessions in the gateway's shared memory**, not shared between gateway instances. See section 6.
 - **Keycloak in dev mode** (`start-dev`, in-memory H2 database): the realm is re-imported on every fresh container, and sessions are lost on restart.
 - **Not yet used, though Keycloak supports them:** DPoP / mTLS-bound tokens and `private_key_jwt`.

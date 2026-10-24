@@ -180,7 +180,8 @@ def _test_values(item) -> tuple:
     tests_dir = str(ROOT / "tests")
     for module in list(sys.modules.values()):
         file = getattr(module, "__file__", None) or ""
-        if file.startswith(tests_dir) and "/traffic/" not in file:
+        # helper modules only: other test modules' constants are not this test's values
+        if file.startswith(tests_dir) and "/traffic/" not in file and not Path(file).name.startswith("test_"):
             for name, value in vars(module).items():
                 if name.isupper():
                     add(name, value)

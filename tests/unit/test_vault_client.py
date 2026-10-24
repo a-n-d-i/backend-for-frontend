@@ -1,11 +1,11 @@
-"""plugins/vault.py against a fake Vault (KV v1), and its use by the plugin and the services."""
+"""services/vault.py against a fake Vault (KV v1), and its use by the services."""
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from apisix.plugins import vault
+from services import vault
 from services.resource import Settings
 
 SECRETS = {"/v1/kv/bff": {"client_secret": "s3cret"}}

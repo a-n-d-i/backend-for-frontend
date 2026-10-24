@@ -1,9 +1,6 @@
 ARG APISIX_VERSION=3.19.0
 FROM apache/apisix:${APISIX_VERSION}-debian
 
-# The python plugin runner has had no release since 0.2.0 (2022); pin the commit
-# so the build stays reproducible.
-ARG RUNNER_REF=250b936f489fc540c465b434d427834448104ac4
 # Match the container user to the host user so files written into the
 # workspace keep the right owner.
 ARG USER_UID=1000
@@ -27,28 +24,13 @@ RUN groupmod -o -g "${USER_GID}" apisix \
     # /etc/profile resets PATH in login shells, drop the venv and claude
     && echo 'export PATH="/home/apisix/.local/bin:/opt/venv/bin:$PATH"' > /etc/profile.d/devcontainer.sh
 
-# Python plugin runner. Its requirements.txt pins PyYAML 5.4.1, which does not
-# build on Python 3.11, so the dependencies are installed with relaxed pins.
-ENV RUNNER_HOME=/opt/apisix-python-plugin-runner \
-    VIRTUAL_ENV=/opt/venv \
+# Python for the tests, the dev tools and the demo services (the gateway's
+# own plugin is Lua, lua/apisix/plugins/tokenhandler.lua).
+ENV VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH
-RUN git clone https://github.com/apache/apisix-python-plugin-runner.git "${RUNNER_HOME}" \
-    && git -C "${RUNNER_HOME}" checkout "${RUNNER_REF}" \
-    # upstream bug: APISIX hands out request id 0 (first request on worker 0),
-    # which the runner treats as "no response" and drops the plugin's changes
-    && sed -i 's/if not action or id == 0:/if not action:/' "${RUNNER_HOME}/apisix/runner/utils/common.py" \
-    && grep -q 'if not action:' "${RUNNER_HOME}/apisix/runner/utils/common.py" \
-    && python3 -m venv "${VIRTUAL_ENV}" \
-    && pip install --no-cache-dir "a6pluginprotos==0.2.1" "minicache==0.0.1" click PyYAML \
-    # make `apisix.runner` / `apisix.plugins` importable without PYTHONPATH,
-    # nginx strips the environment of the processes it spawns
-    && echo "${RUNNER_HOME}" > "$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/apisix-runner.pth" \
-    # the runner only loads plugins from its own apisix/plugins package:
-    # point that package at the workspace
-    && rm -rf "${RUNNER_HOME}/apisix/plugins" \
-    && ln -s /workspace/plugins "${RUNNER_HOME}/apisix/plugins"
+RUN python3 -m venv "${VIRTUAL_ENV}"
 
-# Plugin runtime dependencies (requirements.txt, pulled in by -dev) and test
+# The services' dependencies (requirements.txt, pulled in by -dev) and test
 # tools. Playwright's Chromium (+ its system libraries) is for the SPA browser
 # tests; it goes to a shared path so the apisix user finds it.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
@@ -65,7 +47,7 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 COPY --chmod=755 .devcontainer/gateway-entrypoint.sh /usr/local/bin/gateway-entrypoint.sh
 
 # APISIX reads its config straight from the workspace; apisix.yaml (routes) is
-# hot reloaded, config.yaml needs a container restart.
+# hot reloaded, config.yaml and the plugin code (lua/) need `make reload`.
 RUN ln -sf /workspace/conf/config.yaml /usr/local/apisix/conf/config.yaml \
     && ln -sf /workspace/conf/apisix.yaml /usr/local/apisix/conf/apisix.yaml \
     # log to files instead of the container stdout/stderr so `make logs` works

@@ -18,9 +18,11 @@ every step is idempotent, so it runs on every stack start.
     service-a and service-b, and Keycloak's bootstrap admin password, created
     once and kept;
   - one policy and token per component (gateway, bff, service-a, service-b),
-    each allowed to read only its own secrets. Tokens are re-issued on every
-    run and written to .dev/tokens/ (dev stand-in for a platform auth method
-    such as AppRole or Kubernetes auth). Keycloak's admin password also goes
+    each allowed to read only its own secrets, in .dev/tokens/ (dev stand-in
+    for a platform auth method such as AppRole or Kubernetes auth). A valid
+    token is kept; a missing, foreign or expiring one (30 days left) is
+    replaced, and the old one revoked. Components running with a replaced
+    token need a restart. Keycloak's admin password also goes
     to .dev/, since Keycloak reads it before it can talk to anything.
 
 `keycloak`:
@@ -49,7 +51,10 @@ DOMAIN = "example.test"
 SERVICES = ("bff", "service-a", "service-b")
 CERT_TTL = "2160h"                               # 90 days
 RENEW_BEFORE = datetime.timedelta(days=30)
-TOKEN_TTL = "768h"                               # Vault's default max: 32 days, re-issued on every start
+TOKEN_TTL = "8760h"                              # 1 year (the token auth mount is tuned to allow it)
+# a token is kept while valid this much longer: running components (the
+# gateway reads its token once, at start) must not lose it on a re-run
+TOKEN_RENEW_BEFORE = 30 * 24 * 3600
 
 POLICIES = {
     # the gateway's TLS certificate and key
@@ -204,18 +209,31 @@ def setup_secrets(v: Vault):
     write_private(DEV / "keycloak-admin", admin["password"])
 
 
+def _token_still_good(v: Vault, token: str, policy: str) -> bool:
+    status, body = request("POST", f"{VAULT}/v1/auth/token/lookup", {"token": token}, v.headers, ok=(200, 400, 403))
+    data = body.get("data") or {}
+    return status == 200 and data.get("policies") == [policy] and (data.get("ttl") or 0) > TOKEN_RENEW_BEFORE
+
+
 def setup_tokens(v: Vault):
+    v.call("POST", "sys/auth/token/tune", {"max_lease_ttl": TOKEN_TTL, "default_lease_ttl": TOKEN_TTL})
+    issued = []
     for name, policy in POLICIES.items():
         v.call("PUT", f"sys/policies/acl/{name}", {"policy": policy})
         token_file = DEV / "tokens" / name
-        if token_file.exists():
+        old = token_file.read_text().strip() if token_file.exists() else None
+        if old and _token_still_good(v, old, name):
+            continue
+        if old:
             # the previous token of this component is revoked, not left lying around
-            v.call("POST", "auth/token/revoke", {"token": token_file.read_text().strip()}, ok=(200, 204, 400, 403))
+            v.call("POST", "auth/token/revoke", {"token": old}, ok=(200, 204, 400, 403))
         token = v.call("POST", "auth/token/create-orphan", {
             "policies": [name], "no_default_policy": True, "ttl": TOKEN_TTL, "renewable": True,
             "display_name": name, "meta": {"component": name}})["auth"]["client_token"]
         write_private(token_file, token)
-    log(f"tokens: {', '.join(POLICIES)} (policies: read own secrets only) in {DEV / 'tokens'}")
+        issued.append(name)
+    log(f"tokens in {DEV / 'tokens'} (policies: read own secrets only); "
+        f"{'issued: ' + ', '.join(issued) + ' (restart these components)' if issued else 'all still valid'}")
 
 
 def cmd_vault():

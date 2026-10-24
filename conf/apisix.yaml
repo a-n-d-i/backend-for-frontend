@@ -36,35 +36,29 @@ global_rules:
             Strict-Transport-Security: "max-age=31536000; includeSubDomains"
 
 plugin_configs:
-  # The token handler (BFF), shared by the /bff and /api routes so both use
-  # the same configuration and the same sessions. `value` is passed to
-  # TokenHandler.config() as a raw JSON string; see DEFAULTS in
-  # plugins/tokenhandler.py for the options. `apis` is the allowlist of APIs
-  # the BFF forwards to, each with the audience and scope its token is
-  # exchanged for (BBA 6.1.3.6). The client secret comes from Vault, read
-  # with the BFF's own token (policy: read kv/bff only).
+  # The token handler (BFF), lua/apisix/plugins/tokenhandler.lua, shared by
+  # the /bff and /api routes so both use the same configuration; see its
+  # schema for all options. `apis` is the allowlist of APIs the BFF forwards
+  # to, each with the audience and scope its token is exchanged for
+  # (BBA 6.1.3.6). The client secret comes from Vault, read with the BFF's own
+  # token (policy: read kv/bff only).
   # DEV ONLY: trace_file records requests that carry X-Trace-Id (only the
   # tests send it) for the traffic report, tokens included. Never set it in
   # production.
   - id: bff
     plugins:
-      ext-plugin-pre-req:
-        conf:
-          - name: tokenhandler
-            value: |
-              {
-                "issuer": "https://auth.example.test/realms/demo",
-                "client_id": "bff",
-                "client_secret": "vault:kv/bff#client_secret",
-                "vault": {"addr": "http://vault:8200", "token_file": "/workspace/.dev/tokens/bff"},
-                "redirect_uri": "https://app.example.test/bff/callback",
-                "ca_file": "/workspace/.dev/ca.pem",
-                "apis": {
-                  "/api/a/": {"audience": "service-a", "scope": "api-a"},
-                  "/api/b/": {"audience": "service-b", "scope": "api-b"}
-                },
-                "trace_file": "/workspace/traffic-report/bff-trace.jsonl"
-              }
+      tokenhandler:
+        issuer: https://auth.example.test/realms/demo
+        client_id: bff
+        client_secret: "vault:kv/bff#client_secret"
+        vault:
+          addr: http://vault:8200
+          token_file: /workspace/.dev/tokens/bff
+        redirect_uri: https://app.example.test/bff/callback
+        apis:
+          /api/a/: {audience: service-a, scope: api-a}
+          /api/b/: {audience: service-b, scope: api-b}
+        trace_file: /workspace/traffic-report/bff-trace.jsonl
 
 routes:
   # Keycloak; it knows its public URL (KC_HOSTNAME), APISIX adds X-Forwarded-*

@@ -13,15 +13,12 @@ test-e2e:
 	pytest tests/e2e
 
 lint:
-	ruff check plugins tests
+	ruff check services scripts tests
 
-# Pick up plugin code and config.yaml changes (apisix.yaml is hot reloaded):
-# APISIX re-reads its config, and respawns the runner after it exits.
+# Pick up plugin code (lua/) and config.yaml changes (apisix.yaml is hot
+# reloaded): APISIX regenerates nginx.conf, new workers load the new code.
 reload:
 	apisix reload
-	pkill -f '[b]in/py-runner start' || true
-	@# respawn happens 3s after exit
-	@sleep 4
 
 logs:
 	tail -f /usr/local/apisix/logs/error.log

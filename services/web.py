@@ -1,7 +1,7 @@
 """
 Minimal HTTP plumbing for the demo services (stdlib only): a threaded server
 with a route table, request parsing, JSON responses, the dev traffic trace
-(plugins/trace.py) and an outgoing client that never follows redirects.
+(services/trace.py) and an outgoing client that never follows redirects.
 """
 import base64
 import json
@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 import jwt
 
-from plugins import trace
+from services import trace
 
 log = logging.getLogger("services")
 

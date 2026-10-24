@@ -8,8 +8,9 @@ secrets, codes and tokens included), the request the BFF forwards to an API,
 and notes on its decisions. The test run joins these with the traffic it saw
 itself and renders sequence diagrams.
 
-Used by the BFF plugin (`trace_file` in its route config) and by the services
-in services/ (env TRACE_FILE). Each writer names itself as `source`.
+Used by the services in services/ (env TRACE_FILE); the BFF plugin writes
+the same format (lua/apisix/plugins/tokenhandler/trace.lua). Each writer
+names itself as `source`.
 
 Never enable it outside a development setup: the trace holds secrets and
 tokens in clear text, which these components otherwise never log.

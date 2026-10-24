@@ -1,3 +1,3 @@
-# Runtime dependencies of the plugins (installed into the runner's venv)
+# Runtime dependencies of the demo services (services/), also used by the tests
 PyJWT[crypto]==2.10.1
 cryptography==50.0.2
