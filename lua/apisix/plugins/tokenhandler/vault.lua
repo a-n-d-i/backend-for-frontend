@@ -3,14 +3,13 @@
 --
 -- A configuration value `vault:<path>#<field>`, e.g. `vault:kv/bff#client_secret`,
 -- is replaced by that field of the secret at `<path>`. The BFF reads with its
--- own token (policy: read kv/bff only), from a file, so a new token
--- (re-issued on every stack start) is picked up without a restart. Values
+-- own token (policy: read kv/bff only), from a file, so a replaced token is
+-- picked up without a restart. Values
 -- are cached in shared memory for a few minutes, so a rotated secret arrives
 -- within that time.
 --
 -- Errors are raised as {kind = "vault", message = ...}.
 --
-local trace = require("apisix.plugins.tokenhandler.trace")
 local util = require("apisix.plugins.tokenhandler.util")
 
 local _M = {
@@ -35,15 +34,7 @@ function _M.parse(ref)
 end
 
 local function default_fetch(url, token)
-    local headers = {["X-Vault-Token"] = token}
-    if trace.active() then
-        headers[trace.HEADER] = trace.current_id()
-    end
-    local t_start = trace.now()
-    local status, body, resp_headers, err = util.http("GET", url, {headers = headers})
-    if trace.active() then
-        trace.exchange("GET", url, headers, nil, status, resp_headers, body, t_start, err)
-    end
+    local status, body, _, err = util.http("GET", url, {headers = {["X-Vault-Token"] = token}})
     return status, body, err
 end
 

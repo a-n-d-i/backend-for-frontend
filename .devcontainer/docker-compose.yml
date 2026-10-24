@@ -32,8 +32,6 @@ x-service-env: &service-env
   VAULT_ADDR: http://vault:8200
   # trust anchor for Keycloak's certificate: the CA of Vault's PKI
   SSL_CERT_FILE: /workspace/.dev/ca.pem
-  # DEV ONLY: traffic trace for the test report (holds tokens)
-  TRACE_FILE: /workspace/traffic-report/bff-trace.jsonl
   PYTHONUNBUFFERED: "1"
 
 services:

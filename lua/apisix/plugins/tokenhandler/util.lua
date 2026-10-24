@@ -15,12 +15,10 @@ local _M = {}
 
 _M.json_decode = cjson.decode
 
--- JSON with [] for empty lists (refs, ...) where the trace reader expects lists
 function _M.json_encode(value)
     return cjson.encode(value)
 end
 
-_M.empty_array = cjson.empty_array
 _M.null = cjson.null
 
 -- JSON null for nil, so the key is present

@@ -24,7 +24,6 @@
 local core = require("apisix.core")
 local oidc = require("apisix.plugins.tokenhandler.oidc")
 local sessions = require("apisix.plugins.tokenhandler.sessions")
-local trace = require("apisix.plugins.tokenhandler.trace")
 local util = require("apisix.plugins.tokenhandler.util")
 local vault = require("apisix.plugins.tokenhandler.vault")
 
@@ -88,9 +87,6 @@ local schema = {
             properties = {addr = {type = "string"}, token_file = {type = "string"}},
             required = {"addr", "token_file"},
         },
-        -- DEV/TEST ONLY: file for the traffic trace of requests with
-        -- X-Trace-Id, see trace.lua. Holds tokens in clear text.
-        trace_file = {type = "string"},
     },
     required = {"issuer", "client_id", "client_secret", "redirect_uri"},
 }
@@ -218,8 +214,6 @@ function Bff:csrf_ok()
     end
     if not ok then
         core.log.warn("CSRF check failed for ", core.request.get_method(), " ", self.ctx.var.uri)
-        trace.note(string.format("CSRF check failed: %s=%s, Sec-Fetch-Site=%s, Origin=%s", self.conf.csrf_header,
-                                 tostring(csrf), tostring(site), tostring(origin)), {"BBA 6.1.3.3", "OWASP CSRF"})
     end
     return ok
 end
@@ -230,8 +224,6 @@ end
 
 function Bff:login_failed(reason)
     core.log.warn("login failed: ", reason)
-    trace.note("Login refused: " .. reason .. ". The pending login is dropped, the cookie cleared.",
-               {"RFC 9700 4.7", "OIDC Core 3.1.3.7"})
     return json(400, {error = "login_failed", reason = reason}, self:cookie("", "Lax", true))
 end
 
@@ -254,10 +246,6 @@ function Bff:login()
     -- PKCE S256 challenge [RFC 7636 4.2]
     local challenge = util.b64url(util.sha256(verifier))
     local url = self.provider:authorization_url(self.conf.redirect_uri, self.conf.scope, state, nonce, challenge)
-    trace.note("New login: random state, nonce and PKCE code_verifier, kept in a pending session. "
-               .. "code_challenge = BASE64URL(SHA256(code_verifier)); the verifier itself stays here.",
-               {"RFC 7636 4.1", "RFC 7636 4.2", "RFC 9700 4.7.1", "OIDC Core 3.1.2.1"},
-               {state = state, nonce = nonce, code_verifier = verifier, code_challenge = challenge})
 
     -- The pending login is bound to this browser by the cookie, which is what
     -- makes `state` a CSRF defense [RFC 9700 4.7.1]. SameSite=Lax, not Strict:
@@ -305,8 +293,6 @@ function Bff:callback()
     if not util.const_eq(self:arg("state"), pending.state) then
         return self:login_failed("state mismatch")
     end
-    trace.note("state matches the pending login bound to this browser's cookie; the pending login is used up.",
-               {"RFC 9700 4.7.1", "RFC 6749 10.12"}, {state = pending.state})
 
     -- mix-up defense: the response must come from our issuer [RFC 9207; RFC 9700 4.4.2.1]
     local iss = self:arg("iss")
@@ -341,8 +327,6 @@ function Bff:callback()
     if not claims then
         return self:login_failed("invalid ID token: " .. invalid.message)
     end
-    trace.note("ID token valid: signature with a key from jwks_uri, iss, aud, exp, iat and the nonce of this "
-               .. "login.", {"OIDC Core 3.1.3.7", "RFC 9700 4.5.3.2"}, {nonce = pending.nonce, sub = claims.sub})
 
     local user = {}
     for _, name in ipairs(USER_CLAIMS) do
@@ -355,8 +339,6 @@ function Bff:callback()
         -- the authorization server's session, for back-channel logout
         sid = claims.sid,
         service_tokens = {},
-        -- DEV ONLY: so a later back-channel logout shows up in this login's trace
-        trace_id = trace.current_id(),
     }
     store_tokens(session, tokens)
     core.log.info("login of ", claims.sub)
@@ -364,8 +346,6 @@ function Bff:callback()
     -- (planted or not) never becomes an authenticated session
     -- [OWASP Session: renew the session ID after login].
     local new_id = sessions.create(session)
-    trace.note("Session created under a new id; tokens stay in the server-side session, the browser gets only "
-               .. "the id.", {"BBA 6.1.2.3", "OWASP Session"}, {session_id = new_id})
     -- The session cookie is SameSite=Strict [BBA 6.1.3.2]: the SPA calls the BFF same-site only.
     return redirect(pending.return_to, self:cookie(new_id, "Strict"))
 end
@@ -414,7 +394,6 @@ function Bff:backchannel_logout()
     if not self:method_is("POST") then
         return self:wrong_method("POST")
     end
-    local t_start = trace.now()
     local body = core.request.get_body() or ""
     local logout_token = ngx.decode_args(body).logout_token
     local claims, invalid
@@ -432,26 +411,7 @@ function Bff:backchannel_logout()
     local ended = sessions.delete_by(claims.sid, claims.sub)
     core.log.info("back-channel logout of sid ", tostring(claims.sid), ": ", #ended, " session(s) ended")
     -- [2.8] 200 OK, not cached
-    local status, resp_body = json(200, {})
-
-    -- DEV ONLY: the authorization server sends no X-Trace-Id; record the
-    -- request in the trace of the login whose session it ended
-    for _, session in ipairs(ended) do
-        trace.start(self.conf.trace_file, session.trace_id)
-        trace.emit("incoming", {
-            method = "POST", url = self.origin .. self.ctx.var.uri,
-            req_headers = trace.header_list(ngx.req.get_headers()), req_body = body,
-            status = status,
-            resp_headers = trace.header_list({["Content-Type"] = "application/json", ["Cache-Control"] = "no-store",
-                                              ["X-Content-Type-Options"] = "nosniff"}),
-            resp_body = resp_body, t_start = t_start, t_end = trace.now(),
-        })
-        trace.note("Back-channel logout: the logout token is valid (signature, iss, aud, iat, jti not seen "
-                   .. "before, the logout event, no nonce), so the BFF session with this sid is gone.",
-                   {"OIDC BCL 2.6", "OIDC BCL 2.8"}, {sid = claims.sid})
-        trace.stop()
-    end
-    return status, resp_body
+    return json(200, {})
 end
 
 -- -- tokens ------------------------------------------------------------------------
@@ -465,8 +425,6 @@ function Bff:fresh_access_token(session)
     if not session.refresh_token then
         return nil
     end
-    trace.note("Access token about to expire: refresh it with the refresh token and client authentication.",
-               {"BBA 6.1.2.2", "RFC 6749 6"}, {refresh_token = session.refresh_token})
     local ok, err = pcall(function()
         local tokens = self.provider:refresh(session.refresh_token)
         if tokens.id_token then
@@ -529,9 +487,6 @@ function Bff:api_token(session_id, api)
             token = tokens.access_token, expires_at = ngx.now() + (tonumber(tokens.expires_in) or 60),
         }
         sessions.save(session_id, session)
-        trace.note("Token exchange: the session's access token became one for " .. api.audience .. " only (scope "
-                   .. api.scope .. "), cached until shortly before it expires.", {"RFC 8693 2.1", "RFC 9700 2.3"},
-                   {audience = api.audience})
         return tokens.access_token
     end)
 end
@@ -563,16 +518,6 @@ function Bff:proxy()
     core.request.set_header(self.ctx, "Authorization", "Bearer " .. token)
     core.request.set_header(self.ctx, "Cookie", nil)
     core.request.set_header(self.ctx, self.conf.csrf_header, nil)
-    if trace.active() then
-        local headers = util.array()
-        for k, v in pairs(ngx.req.get_headers()) do
-            if k:lower() ~= trace.HEADER:lower() then
-                headers[#headers + 1] = util.array({k == "authorization" and "Authorization" or k, tostring(v)})
-            end
-        end
-        trace.emit("forward", {method = core.request.get_method(), path = self.ctx.var.uri, audience = api.audience,
-                               headers = headers, removed = util.array({"cookie", self.conf.csrf_header:lower()})})
-    end
     return nil
 end
 
@@ -600,11 +545,9 @@ end
 -- -- the plugin ------------------------------------------------------------------
 
 function _M.access(conf, ctx)
-    trace.start(conf.trace_file, core.request.header(ctx, trace.HEADER))
     local ok, status, body = pcall(function()
         return Bff.new(vault.resolve(conf, conf.vault), ctx):handle()
     end)
-    trace.stop()
     if ok then
         return status, body
     end

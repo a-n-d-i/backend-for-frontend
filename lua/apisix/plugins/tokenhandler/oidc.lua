@@ -11,7 +11,6 @@
 -- token failed validation).
 --
 local pkey = require("resty.openssl.pkey")
-local trace = require("apisix.plugins.tokenhandler.trace")
 local util = require("apisix.plugins.tokenhandler.util")
 
 local _M = {}
@@ -43,19 +42,9 @@ local function token_error(message)
     error({kind = "token", message = message}, 0)
 end
 
--- default transport: util.http, recorded in the dev trace; it passes the
--- trace id on, so the next hop traces too
-local function traced_http(method, url, opts)
-    opts = opts or {}
-    if trace.active() then
-        opts.headers = opts.headers or {}
-        opts.headers[trace.HEADER] = trace.current_id()
-    end
-    local t_start = trace.now()
-    local status, body, headers, err = util.http(method, url, opts)
-    if trace.active() then
-        trace.exchange(method, url, opts.headers, opts.body, status, headers, body, t_start, err)
-    end
+-- default transport: util.http
+local function default_http(method, url, opts)
+    local status, body, _, err = util.http(method, url, opts)
     return status, body, err
 end
 
@@ -70,7 +59,7 @@ function _M.new(opts)
         client_id = opts.client_id,
         client_secret = opts.client_secret,
         allow_insecure_http = opts.allow_insecure_http,
-        http = opts.http or traced_http,
+        http = opts.http or default_http,
         replay = opts.replay,
         clock = opts.clock or ngx.time,
         seen_jti = {},

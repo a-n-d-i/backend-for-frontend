@@ -8,9 +8,6 @@ import re
 
 import pytest
 from playwright.sync_api import Page, expect
-
-from tests.traffic import recorder as traffic
-
 from spa_settings import APP_URL, EMAIL, ISSUER, PASSWORD, USERNAME
 
 ACCOUNT_CONSOLE = f"{ISSUER}/account/"
@@ -89,9 +86,6 @@ def test_single_sign_on_and_single_logout_with_another_application(app: Page):
     # single logout: signing out at Keycloak ends the SPA's session too
     console.goto(f"{ISSUER}/protocol/openid-connect/logout")
     console.locator("#kc-logout").click()
-    traffic.note("Logout at Keycloak (from another application): Keycloak POSTs a logout token to "
-                 "https://app.example.test/bff/backchannel-logout, the BFF ends the matching session.",
-                 ["OIDC BCL 2.5"], lane="keycloak")
 
     app.reload()
     expect(app.get_by_test_id("status")).to_have_text("You are not logged in.")
@@ -114,9 +108,6 @@ def test_other_origin_cannot_use_the_session(app: Page):
 
     # the preflight for the custom header is refused, so the request never happens
     assert status == "blocked"
-    traffic.note("fetch(app.example.test/api/a/whoami, X-BFF-CSRF) from a page on auth.example.test: "
-                 "Chromium needs a CORS preflight for the custom header, the BFF refuses it, so the request "
-                 "is never sent (not even visible to Playwright).", ["BBA 6.1.3.3.2", "OWASP CSRF"])
 
 
 def test_spa_runs_under_strict_csp(page: Page):

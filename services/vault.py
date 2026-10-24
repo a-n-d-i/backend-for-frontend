@@ -15,7 +15,6 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-from services import trace
 
 PREFIX = "vault:"
 CACHE_SECONDS = 300
@@ -50,21 +49,14 @@ def read(ref: str, addr: str, token_file: str, timeout: float = 5) -> str:
 
     url = f"{addr.rstrip('/')}/v1/{path}"
     req = urllib.request.Request(url, headers={"X-Vault-Token": token})
-    if trace.active():
-        req.add_header(trace.TRACE_HEADER, trace.current_id())
-    t_start = time.time()
-    status, headers, body, error = None, [], b"", None
+    status, body, error = None, b"", None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status, headers, body = resp.status, resp.getheaders(), resp.read()
+            status, body = resp.status, resp.read()
     except urllib.error.HTTPError as e:
-        status, headers, body = e.code, e.headers.items(), e.read()
+        status, body = e.code, e.read()
     except (urllib.error.URLError, OSError) as e:
         error = str(e)
-    if trace.active():
-        # the token is the component's own, the trace is dev only (it records secrets anyway)
-        trace.exchange("GET", url, req.header_items(), None, status, headers,
-                       body.decode(errors="replace"), t_start, error)
     if error is not None:
         raise VaultError(f"Vault unreachable: {error}")
     if status != 200:

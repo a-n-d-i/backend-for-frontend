@@ -19,7 +19,7 @@ Environment: SERVICE_ID (its client id and the audience it accepts),
 SERVICE_SECRET (client secret for introspection, usually a Vault reference
 `vault:kv/service-a#client_secret`), VAULT_ADDR and VAULT_TOKEN_FILE (the
 service's own Vault token: it can read only its own secret), SERVICE_SCOPE
-(scope its read endpoint needs), ISSUER, PORT, TRACE_FILE (dev only),
+(scope its read endpoint needs), ISSUER, PORT,
 SSL_CERT_FILE (trust anchor for Keycloak's TLS certificate).
 
     python -m services.resource
@@ -33,8 +33,8 @@ from typing import Optional
 
 import jwt
 
-from services import trace, vault
-from services.web import Request, Response, TracedJwks, json_response, post_form, serve
+from services import vault
+from services.web import Request, Response, json_response, post_form, serve
 
 ALGORITHMS = ["RS256", "PS256", "ES256"]
 LEEWAY = 30
@@ -89,7 +89,7 @@ class ResourceServer:
     @property
     def keys(self):
         if self._keys is None:
-            self._keys = TracedJwks(self.metadata["jwks_uri"], cache_jwk_set=True, lifespan=300)
+            self._keys = jwt.PyJWKClient(self.metadata["jwks_uri"], cache_jwk_set=True, lifespan=300)
         return self._keys
 
     # -- token checks ---------------------------------------------------------------
@@ -120,9 +120,6 @@ class ResourceServer:
         # still active? (ended SSO session, revoked, ...) [RFC 7662 2.2]
         if not self._introspect(token).get("active"):
             raise Unauthorized("token is no longer active (session ended or revoked)")
-        trace.note(f"{self.s.service_id} accepts the token: signature, typ at+jwt, iss, aud={self.s.service_id}, "
-                   f"exp, scope {needed_scope}, and Keycloak says it is active.",
-                   ["RFC 9068 4", "RFC 7662 2.2", "RFC 9700 2.3"], sid=claims.get("sid"))
         return claims
 
     def _introspect_at_keycloak(self, token: str) -> dict:
@@ -138,12 +135,10 @@ class ResourceServer:
         try:
             claims = self.authenticate(req, needed_scope)
         except Unauthorized as e:
-            trace.note(f"{self.s.service_id} rejects the request: {e}", ["RFC 6750 3.1", "RFC 9068 4"])
             return json_response(401, {"error": "invalid_token", "error_description": str(e)}, [
                 ("WWW-Authenticate", f'Bearer realm="{self.s.service_id}", error="invalid_token", '
                                      f'error_description="{e}"')])
         except Forbidden as e:
-            trace.note(f"{self.s.service_id} rejects the request: scope {e} missing", ["RFC 6750 3.1"])
             return json_response(403, {"error": "insufficient_scope", "scope": str(e)}, [
                 ("WWW-Authenticate", f'Bearer realm="{self.s.service_id}", error="insufficient_scope", '
                                      f'scope="{e}"')])

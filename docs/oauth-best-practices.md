@@ -236,7 +236,7 @@ Browser (SPA)                    APISIX + BFF                         Keycloak  
 | Logout invalidates the session server-side, also when it happens elsewhere. | ✅ | `Bff:logout` deletes the session, and back-channel logout deletes it when the SSO session ends elsewhere. The old cookie is useless afterwards. |
 | Don't cache session-bearing responses (`Cache-Control: no-store`). | ✅ | All BFF and service responses. |
 | Bind the session to client properties (IP, User-Agent) to detect hijacking. | ❌ | IP binding breaks mobile users and NAT, and User-Agent is attacker-controlled. `HttpOnly` + `Secure` + `__Host-` + short lifetimes are the protection. |
-| Log session lifecycle and security events. | ✅ | Logins, failed callbacks, failed refreshes and exchanges, back-channel logouts and CSRF rejections are logged by the `tokenhandler` logger into the APISIX error log (`make logs`). Session ids and tokens are never logged, except in the dev-only traffic trace (`trace_file` / `TRACE_FILE`, see README), which records requests carrying `X-Trace-Id` in full for the test report and must stay unset in production. |
+| Log session lifecycle and security events. | ✅ | Logins, failed callbacks, failed refreshes and exchanges, back-channel logouts and CSRF rejections are logged by the `tokenhandler` logger into the APISIX error log (`make logs`). Session ids and tokens are never logged. |
 | Session store survives restarts, is shared across instances. | ❌ / partly | A shared memory dict (`lua_shared_dict tokenhandler-sessions`) shared by all nginx workers. It survives `make reload` but not a gateway restart (users log in again, silently thanks to SSO), and isn't shared between gateway instances. Production with more than one gateway needs a shared store (e.g. Redis) behind the functions of `sessions.lua`. |
 
 ## 7. OWASP CSRF Prevention Cheat Sheet
@@ -277,7 +277,7 @@ All secrets of the stack and its PKI are in Vault: one server with persistent st
 | Secrets in transit are encrypted. | 🔧 | Vault listens on plain http, reachable only inside the Docker network (and through the gateway with TLS as `vault.example.test`). Production: a TLS listener. |
 | Secure the secrets manager itself: no root token at rest, auto-unseal, authenticate workloads by platform identity. | 🔧 | Dev stand-ins: the unseal key and root token are in `.dev/vault-init.json`, the component tokens in `.dev/tokens/` (gitignored, mode 600). Production: auto-unseal with a KMS/HSM, the root token revoked after setup, and Kubernetes or AppRole authentication instead of token files. |
 | Audit access to secrets. | ❌ | No Vault audit device is enabled; `vault audit enable file …` would log every access. |
-| Don't log secrets. | ✅ / 🔧 | The BFF and the services never log secrets, except in the dev-only traffic trace (see section 6). |
+| Don't log secrets. | ✅ | The BFF and the services never log secrets or tokens. |
 
 ## Known limitations of the dev setup
 
